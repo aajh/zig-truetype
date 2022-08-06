@@ -37,6 +37,15 @@ const TableDirectoryEntry = packed struct {
     length  : u32,
 };
 
+fn getTableDirectoryEntry(entries: []TableDirectoryEntry, tag: *const [TableDirectoryEntry.TAG_LENGTH]u8) ?TableDirectoryEntry {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.tag[0..entry.tag.len], tag)) {
+            return entry;
+        }
+    }
+    return null;
+}
+
 const HeadTable = packed struct {
     version            : u32,
     font_revision      : u32,
@@ -96,7 +105,7 @@ const CmapFormat4 = struct {
     end_codes       : []u16,
     start_codes     : []u16,
     id_deltas       : []u16,
-    id_range_offsets: []u16,
+    id_range_offsets: []u16, // Processed to be an index to the glyph_indices array
     glyph_indices   : []u16,
 
     fn init(gpa: std.mem.Allocator, seekable_stream: anytype, reader: anytype) !CmapFormat4 {
@@ -144,18 +153,18 @@ const CmapFormat4 = struct {
 
         cmap.id_range_offsets = try gpa.alloc(u16, seg_count);
         errdefer gpa.free(cmap.id_range_offsets);
-        for (cmap.id_range_offsets) |*id_range_offset| {
+        for (cmap.id_range_offsets) |*id_range_offset, i| {
             id_range_offset.* = try reader.readIntBig(u16);
             if (id_range_offset.* != 0) {
-                // TODO: If non-zero, calculate the index to the glyph_indices array.
-                std.debug.print("Unsupported cmap format 4 table (id_range_offset was non-zero)\n", .{});
-                return error.UnsupportedFontFile;
+                // TODO: Test this code.
+                const offset_to_glyph_indices_start = (seg_count - @intCast(u16, i)) * @sizeOf(u16);
+                id_range_offset.* = (id_range_offset.* - offset_to_glyph_indices_start) / @sizeOf(u16);
             }
         }
         std.debug.print("id_range_offsets: {any}\n", .{ cmap.id_range_offsets });
 
-        const current_pos = try seekable_stream.getPos();
-        const glyph_indices_len = header.length - (current_pos - cmap_offset);
+        const glyph_indices_start_pos = try seekable_stream.getPos();
+        const glyph_indices_len = header.length - (glyph_indices_start_pos - cmap_offset);
         if (glyph_indices_len % 2 != 0) {
             std.debug.print("Invalid glyph_indices length {d} (should be divisable by two)\n", .{ glyph_indices_len });
             return error.InvalidFontFile;
@@ -178,9 +187,9 @@ const CmapFormat4 = struct {
         cmap.gpa.free(cmap.glyph_indices);
     }
 
-    fn codepointToGlyphIndex(cmap: CmapFormat4, codepoint: u21) !u16 {
+    fn codepointToGlyphIndex(cmap: CmapFormat4, codepoint: u21) u16 {
         if (codepoint > std.math.maxInt(u16)) {
-            return error.UnsupportedCodepoint;
+            return 0;
         }
         const c = @intCast(u16, codepoint);
 
@@ -192,37 +201,33 @@ const CmapFormat4 = struct {
             }
         }
         if (segment_index == -1) {
-            std.debug.print("Cmap segment not found for codepoint {}\n", .{ c });
-            return error.CmapSegmentNotFound;
+            std.debug.print("cmap segment not found for codepoint {}\n", .{ c });
+            return 0;
         }
         std.debug.print("{d}\n", .{ segment_index });
         const i = @intCast(usize, segment_index);
 
-        std.debug.print("Cmap segment for codepoint {}: end {}, start {}, id_delta {}, id_range_offset {}\n", .{ c, cmap.end_codes[i], cmap.start_codes[i], cmap.id_deltas[i], cmap.id_range_offsets[i] });
-
-        //if (cmap.start_codes[i] > c) {
-            //std.debug.print("Cmap segment {d} invalid for codepoint {}\n", .{ segment_index, c });
-            //return error.CmapSegmentInvalid;
-        //}
+        std.debug.print("cmap segment for codepoint {}: end {}, start {}, id_delta {}, id_range_offset {}\n", .{ c, cmap.end_codes[i], cmap.start_codes[i], cmap.id_deltas[i], cmap.id_range_offsets[i] });
 
         if (cmap.id_range_offsets[i] != 0) {
-            // TODO: Support this case
-            std.debug.print("Unsupported cmap table: id_range_offset was non-zero for codepoint {}\n", .{ c });
-            return error.UnsupportedFontFile;
+            // TODO: Test this code
+            const index_to_glyph_indices = cmap.id_range_offsets[i] + (c - cmap.start_codes[i]);
+            if (index_to_glyph_indices >= cmap.glyph_indices.len) {
+                std.debug.print("cmap table resulted in an invalid index to glyph indices array\n", .{});
+                return 0;
+            }
+
+            const glyph_index = cmap.glyph_indices[index_to_glyph_indices];
+            if (glyph_index != 0) {
+                return @intCast(u16, (@intCast(u32, cmap.id_deltas[i]) + @intCast(u32, glyph_index)) & 0xFFFF);
+            } else {
+                return 0;
+            }
         }
 
-        return @intCast(u16, (@intCast(u32, cmap.id_deltas[i]) + @intCast(u32, c)) % 65536);
+        return @intCast(u16, (@intCast(u32, cmap.id_deltas[i]) + @intCast(u32, c)) & 0xFFFF);
     }
 };
-
-fn getTableDirectoryEntry(entries: []TableDirectoryEntry, tag: *const [TableDirectoryEntry.TAG_LENGTH]u8) ?TableDirectoryEntry {
-    for (entries) |entry| {
-        if (std.mem.eql(u8, entry.tag[0..entry.tag.len], tag)) {
-            return entry;
-        }
-    }
-    return null;
-}
 
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -337,7 +342,7 @@ pub fn main() !void {
     var cmap = try CmapFormat4.init(arena, font_file.seekableStream(), reader);
     defer cmap.deinit();
     const codepoint = 'A';
-    const glyph_index = try cmap.codepointToGlyphIndex(codepoint);
+    const glyph_index = cmap.codepointToGlyphIndex(codepoint);
     std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
 }
 
