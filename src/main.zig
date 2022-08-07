@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Allocator = std.mem.Allocator;
 const native_endian = builtin.cpu.arch.endian();
 
 fn bswapAllIntFieldsToHost(comptime S: type, ptr: *S) void {
@@ -101,14 +102,14 @@ const CmapFormat4 = struct {
         range_shift   : u16,
     };
 
-    gpa             : std.mem.Allocator,
+    gpa             : Allocator,
     end_codes       : []u16,
     start_codes     : []u16,
     id_deltas       : []u16,
     id_range_offsets: []u16, // Processed to be an index to the glyph_indices array
     glyph_indices   : []u16,
 
-    fn init(gpa: std.mem.Allocator, seekable_stream: anytype, reader: anytype) !CmapFormat4 {
+    fn init(gpa: Allocator, seekable_stream: anytype, reader: anytype) !CmapFormat4 {
         var cmap: CmapFormat4 = undefined;
         cmap.gpa = gpa;
 
@@ -229,6 +230,88 @@ const CmapFormat4 = struct {
     }
 };
 
+const LocaTable = struct {
+    const OffsetsUnion = union(enum) {
+        short: []u16,
+        long : []u32,
+    };
+
+    gpa: Allocator,
+    offsets: OffsetsUnion,
+
+    fn init(gpa: Allocator, loca_table_directory_entry: TableDirectoryEntry, head_table: HeadTable, seekable_stream: anytype, reader: anytype) !LocaTable {
+        try seekable_stream.seekTo(loca_table_directory_entry.offset);
+        const length = loca_table_directory_entry.length;
+
+        const offsets = switch (head_table.index_to_loc_format) {
+            0 => blk: {
+                var os = try gpa.alloc(u16, length / @sizeOf(u16));
+                for (os) |*o| {
+                    o.* = try reader.readIntBig(u16);
+                }
+                break :blk OffsetsUnion{
+                    .short = os,
+                };
+            },
+            1 => blk: {
+                var os = try gpa.alloc(u32, length / @sizeOf(u32));
+                for (os) |*o| {
+                    o.* = try reader.readIntBig(u32);
+                }
+                break :blk OffsetsUnion{
+                    .long = os,
+                };
+            },
+            else => {
+                std.debug.print("Invalid index_to_loc_format: expected 0 or 1, got {d}\n", .{ head_table.index_to_loc_format });
+                return error.InvalidFontFile;
+            }
+        };
+
+        return LocaTable{
+            .gpa = gpa,
+            .offsets = offsets,
+        };
+    }
+
+    fn deinit(loca: LocaTable) void {
+        switch (loca.offsets) {
+            .short => |offsets| loca.gpa.free(offsets),
+            .long  => |offsets| loca.gpa.free(offsets),
+        }
+    }
+
+    const GlyphLocation = struct {
+        offset: u32,
+        length: u32,
+    };
+
+    fn glyphIndexToLocation(loca: LocaTable, glyph: u32) !GlyphLocation {
+        switch (loca.offsets) {
+            .short => |offsets| {
+                if (glyph + 1 >= offsets.len) {
+                    return error.GlyphNotFound;
+                }
+
+                return GlyphLocation{
+                    .offset = offsets[glyph],
+                    .length = offsets[glyph + 1] - offsets[glyph],
+                };
+            },
+            .long => |offsets| {
+                if (glyph + 1 >= offsets.len) {
+                    return error.GlyphNotFound;
+                }
+
+                return GlyphLocation{
+                    .offset = offsets[glyph],
+                    .length = offsets[glyph + 1] - offsets[glyph],
+                };
+            },
+        }
+    }
+};
+
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -344,5 +427,15 @@ pub fn main() !void {
     const codepoint = 'A';
     const glyph_index = cmap.codepointToGlyphIndex(codepoint);
     std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
+
+
+    const loca_table_directory_entry = getTableDirectoryEntry(table_directory, "loca") orelse {
+        std.debug.print("The TrueType font file didn't include \"loca\" table\n", .{});
+        return error.InvalidFontFile;
+    };
+    const loca_table = try LocaTable.init(arena, loca_table_directory_entry, head_table, font_file.seekableStream(), reader);
+    defer loca_table.deinit();
+    const glyph_location = try loca_table.glyphIndexToLocation(glyph_index);
+    std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
 }
 
