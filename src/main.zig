@@ -312,6 +312,23 @@ const LocaTable = struct {
     }
 };
 
+fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i32, IS_SHORT: u8, SAME_OR_POSITIVE: u8) !void {
+    std.debug.assert(flags.len == coordinates.len);
+
+    var previous_coordinate: i32 = 0;
+    for (flags) |flag, i| {
+        var delta_coordinate: i32 = 0;
+        if (flag & IS_SHORT > 0) {
+            delta_coordinate = try reader.readIntBig(u8);
+            if (flag & SAME_OR_POSITIVE == 0) delta_coordinate *= -1;
+        } else if (flag & SAME_OR_POSITIVE == 0) {
+            delta_coordinate = try reader.readIntBig(i16);
+        }
+        previous_coordinate += delta_coordinate;
+        coordinates[i] = previous_coordinate;
+    }
+}
+
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -341,6 +358,7 @@ pub fn main() !void {
     }
 
     var table_directory = try arena.alloc(TableDirectoryEntry, offset_subtable.num_tables);
+    defer arena.free(table_directory);
     for (table_directory) |*entry| {
         entry.* = try reader.readStruct(TableDirectoryEntry);
         bswapAllIntFieldsToHost(TableDirectoryEntry, entry);
@@ -424,7 +442,7 @@ pub fn main() !void {
     try font_file.seekBy(-@sizeOf(u16));
     var cmap = try CmapFormat4.init(arena, font_file.seekableStream(), reader);
     defer cmap.deinit();
-    const codepoint = 'A';
+    const codepoint = 'D';
     const glyph_index = cmap.codepointToGlyphIndex(codepoint);
     std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
 
@@ -436,6 +454,73 @@ pub fn main() !void {
     const loca_table = try LocaTable.init(arena, loca_table_directory_entry, head_table, font_file.seekableStream(), reader);
     defer loca_table.deinit();
     const glyph_location = try loca_table.glyphIndexToLocation(glyph_index);
+    std.debug.print("\n", .{});
     std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
+
+
+    const glyf_table_directory_entry = getTableDirectoryEntry(table_directory, "glyf") orelse {
+        std.debug.print("The TrueType font file didn't include \"glyf\" table\n", .{});
+        return error.InvalidFontFile;
+    };
+    try font_file.seekTo(glyf_table_directory_entry.offset + glyph_location.offset);
+    const number_of_contours_i16 = try reader.readIntBig(i16);
+    std.debug.print("The glyph has number_of_contours of {d}\n", .{ number_of_contours_i16 });
+    if (number_of_contours_i16 < 0) {
+        std.debug.print("The glyph is a compound glyph, which are not supported\n", .{});
+        return error.UnsupportedGlyph;
+    }
+    const number_of_contours = @intCast(u16, number_of_contours_i16);
+
+    try font_file.seekBy(4 * 2); // Skip glyph bounds
+    var end_points_of_contours = try arena.alloc(u16, number_of_contours);
+    defer arena.free(end_points_of_contours);
+    var points_length: u16 = 0;
+    for (end_points_of_contours) |*end_point| {
+        end_point.* = try reader.readIntBig(u16);
+        if (end_point.* > points_length) points_length = end_point.*;
+    }
+    if (number_of_contours > 0) {
+        points_length += 1;
+    }
+    std.debug.print("End points of contours: {any}, points_length: {d}\n", .{ end_points_of_contours, points_length });
+
+    const instruction_length = try reader.readIntBig(u16);
+    try font_file.seekBy(instruction_length * @sizeOf(u8));
+
+    //const ON_CURVE          : u8 = 0b00000001;
+    const X_IS_SHORT        : u8 = 0b00000010;
+    const Y_IS_SHORT        : u8 = 0b00000100;
+    const REPEAT            : u8 = 0b00001000;
+    const X_SAME_OR_POSITIVE: u8 = 0b00010000;
+    const Y_SAME_OR_POSITIVE: u8 = 0b00100000;
+    var flags = try arena.alloc(u8, points_length);
+    defer arena.free(flags);
+    var flag_i: u16 = 0;
+    while (flag_i < points_length) : (flag_i += 1) {
+        const flag = try reader.readIntBig(u8);
+        flags[flag_i] = flag;
+
+        if (flag & REPEAT > 0) {
+            var repeat_count = try reader.readIntBig(u8);
+            while (repeat_count > 0) : (repeat_count -= 1) {
+                flag_i += 1;
+                if (flag_i >= points_length) {
+                    return error.InvalidGlyph;
+                }
+                flags[flag_i] = flag;
+            }
+        }
+    }
+    std.debug.print("Glyph flags: {any}\n", .{ flags });
+
+    var x_coordinates: []i32 = try arena.alloc(i32, points_length);
+    defer arena.free(x_coordinates);
+    try readCoordinates(reader, flags, x_coordinates, X_IS_SHORT, X_SAME_OR_POSITIVE);
+    std.debug.print("x_coordinates: {any}\n", .{ x_coordinates });
+
+    var y_coordinates: []i32 = try arena.alloc(i32, points_length);
+    defer arena.free(y_coordinates);
+    try readCoordinates(reader, flags, y_coordinates, Y_IS_SHORT, Y_SAME_OR_POSITIVE);
+    std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
 }
 
