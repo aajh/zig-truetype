@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Builder = std.build.Builder;
 
 pub fn build(b: *Builder) !void {
@@ -9,6 +10,12 @@ pub fn build(b: *Builder) !void {
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
+
+    if (builtin.os.tag != .windows) {
+        exe.addIncludeDir("/usr/local/include");
+    }
+
+    exe.linkSystemLibrary("SDL2");
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());

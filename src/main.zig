@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const c = @import("c.zig");
 
 const Allocator = std.mem.Allocator;
 const native_endian = builtin.cpu.arch.endian();
@@ -12,6 +13,23 @@ fn bswapAllIntFieldsToHost(comptime S: type, ptr: *S) void {
             @field(ptr, f.name) = @byteSwap(f.field_type, @field(ptr, f.name));
         }
     }
+}
+
+fn logSdlError(message: []const u8, src: std.builtin.SourceLocation) void {
+    std.debug.print("{s} error {s}:{}: {s}\n", .{ message, src.file, src.line, c.SDL_GetError() });
+}
+
+fn getHighDpiFactor(window: *c.SDL_Window, renderer: *c.SDL_Renderer) !f32 {
+    var window_width: i32 = undefined;
+    c.SDL_GetWindowSize(window, &window_width, null);
+
+    var drawable_width: i32 = undefined;
+    if (c.SDL_GetRendererOutputSize(renderer, &drawable_width, null) != 0) {
+        logSdlError("SDL_GetRendererOutputSize", @src());
+        return error.GetRenderOutputSizeFailed;
+    }
+
+    return @intToFloat(f32, drawable_width) / @intToFloat(f32, window_width);
 }
 
 const OffsetSubtable = packed struct {
@@ -192,27 +210,27 @@ const CmapFormat4 = struct {
         if (codepoint > std.math.maxInt(u16)) {
             return 0;
         }
-        const c = @intCast(u16, codepoint);
+        const cp = @intCast(u16, codepoint);
 
         var segment_index: i32 = -1;
         for (cmap.end_codes) |end_code, i| {
-            if (c <= end_code) {
+            if (cp <= end_code) {
                 segment_index = @intCast(i32, i);
                 break;
             }
         }
         if (segment_index == -1) {
-            std.debug.print("cmap segment not found for codepoint {}\n", .{ c });
+            std.debug.print("cmap segment not found for codepoint {}\n", .{ cp });
             return 0;
         }
         std.debug.print("{d}\n", .{ segment_index });
         const i = @intCast(usize, segment_index);
 
-        std.debug.print("cmap segment for codepoint {}: end {}, start {}, id_delta {}, id_range_offset {}\n", .{ c, cmap.end_codes[i], cmap.start_codes[i], cmap.id_deltas[i], cmap.id_range_offsets[i] });
+        std.debug.print("cmap segment for codepoint {}: end {}, start {}, id_delta {}, id_range_offset {}\n", .{ cp, cmap.end_codes[i], cmap.start_codes[i], cmap.id_deltas[i], cmap.id_range_offsets[i] });
 
         if (cmap.id_range_offsets[i] != 0) {
             // TODO: Test this code
-            const index_to_glyph_indices = cmap.id_range_offsets[i] + (c - cmap.start_codes[i]);
+            const index_to_glyph_indices = cmap.id_range_offsets[i] + (cp - cmap.start_codes[i]);
             if (index_to_glyph_indices >= cmap.glyph_indices.len) {
                 std.debug.print("cmap table resulted in an invalid index to glyph indices array\n", .{});
                 return 0;
@@ -226,7 +244,7 @@ const CmapFormat4 = struct {
             }
         }
 
-        return @intCast(u16, (@intCast(u32, cmap.id_deltas[i]) + @intCast(u32, c)) & 0xFFFF);
+        return @intCast(u16, (@intCast(u32, cmap.id_deltas[i]) + @intCast(u32, cp)) & 0xFFFF);
     }
 };
 
@@ -312,12 +330,12 @@ const LocaTable = struct {
     }
 };
 
-fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i32, IS_SHORT: u8, SAME_OR_POSITIVE: u8) !void {
+fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i16, IS_SHORT: u8, SAME_OR_POSITIVE: u8) !void {
     std.debug.assert(flags.len == coordinates.len);
 
-    var previous_coordinate: i32 = 0;
+    var previous_coordinate: i16 = 0;
     for (flags) |flag, i| {
-        var delta_coordinate: i32 = 0;
+        var delta_coordinate: i16 = 0;
         if (flag & IS_SHORT > 0) {
             delta_coordinate = try reader.readIntBig(u8);
             if (flag & SAME_OR_POSITIVE == 0) delta_coordinate *= -1;
@@ -328,6 +346,270 @@ fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i32, IS_SHORT: u
         coordinates[i] = previous_coordinate;
     }
 }
+
+const Glyph = struct {
+    const Point = std.meta.Vector(2, i16);
+
+    const Line = struct {
+        p0: Point,
+        p1: Point,
+    };
+
+    const QuadraticBezierCurve = struct {
+        p0: Point,
+        p1: Point,
+        p2: Point,
+    };
+
+    const Segment = union(enum) {
+        line                  : Line,
+        quadratic_bezier_curve: QuadraticBezierCurve,
+    };
+
+    gpa: Allocator,
+
+    x_min: i16,
+    y_min: i16,
+    x_max: i16,
+    y_max: i16,
+
+    contours: [][]Segment,
+
+    fn init(gpa: Allocator, reader: anytype) !Glyph {
+        const number_of_contours_i16 = try reader.readIntBig(i16);
+        std.debug.print("The glyph has number_of_contours of {d}\n", .{ number_of_contours_i16 });
+        if (number_of_contours_i16 < 0) {
+            std.debug.print("The glyph is a compound glyph, which are not supported\n", .{});
+            return error.UnsupportedGlyph;
+        }
+        const number_of_contours = @intCast(u16, number_of_contours_i16);
+        var contours = try gpa.alloc([]Segment, number_of_contours);
+        errdefer gpa.free(contours);
+
+        const x_min = try reader.readIntBig(i16);
+        const y_min = try reader.readIntBig(i16);
+        const x_max = try reader.readIntBig(i16);
+        const y_max = try reader.readIntBig(i16);
+        std.debug.print("x_min {d}, y_min {d}, x_max {d}, y_max {d}\n", .{ x_min, y_min, x_max, y_max });
+
+        var end_points_of_contours = try gpa.alloc(u16, number_of_contours);
+        defer gpa.free(end_points_of_contours);
+        var points_length: u16 = 0;
+        for (end_points_of_contours) |*end_point| {
+            end_point.* = try reader.readIntBig(u16);
+            if (end_point.* > points_length) points_length = end_point.*;
+        }
+        if (number_of_contours > 0) {
+            points_length += 1;
+        }
+        std.debug.print("End points of contours: {any}, points_length: {d}\n", .{ end_points_of_contours, points_length });
+
+        const instruction_length = try reader.readIntBig(u16);
+        try reader.skipBytes(instruction_length * @sizeOf(u8), .{});
+
+        const ON_CURVE          : u8 = 0b00000001;
+        const X_IS_SHORT        : u8 = 0b00000010;
+        const Y_IS_SHORT        : u8 = 0b00000100;
+        const REPEAT            : u8 = 0b00001000;
+        const X_SAME_OR_POSITIVE: u8 = 0b00010000;
+        const Y_SAME_OR_POSITIVE: u8 = 0b00100000;
+        var flags = try gpa.alloc(u8, points_length);
+        defer gpa.free(flags);
+        var flag_i: u16 = 0;
+        while (flag_i < points_length) : (flag_i += 1) {
+            const flag = try reader.readIntBig(u8);
+            flags[flag_i] = flag;
+
+            if (flag & REPEAT > 0) {
+                var repeat_count = try reader.readIntBig(u8);
+                while (repeat_count > 0) : (repeat_count -= 1) {
+                    flag_i += 1;
+                    if (flag_i >= points_length) {
+                        return error.InvalidGlyph;
+                    }
+                    flags[flag_i] = flag;
+                }
+            }
+        }
+        std.debug.print("Glyph flags: {any}\n", .{ flags });
+
+        var x_coordinates: []i16 = try gpa.alloc(i16, points_length);
+        defer gpa.free(x_coordinates);
+        try readCoordinates(reader, flags, x_coordinates, X_IS_SHORT, X_SAME_OR_POSITIVE);
+        std.debug.print("x_coordinates: {any}\n", .{ x_coordinates });
+
+        var y_coordinates: []i16 = try gpa.alloc(i16, points_length);
+        defer gpa.free(y_coordinates);
+        try readCoordinates(reader, flags, y_coordinates, Y_IS_SHORT, Y_SAME_OR_POSITIVE);
+        std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
+
+        var last_contour_end: u16 = 0;
+        var contour_i: u16        = 0;
+        errdefer for (contours) |contour, i| {
+            if (i > contour_i) break;
+            gpa.free(contour);
+        };
+        while (contour_i < number_of_contours) : (contour_i += 1) {
+            const contour_end = end_points_of_contours[contour_i] + 1;
+            defer last_contour_end = contour_end;
+
+            var segment_count: u16 = 1; // 1 is for the segment that closes the contour
+            var state: enum {
+                start,
+                on_curve, // The next point is the end of a straight line or a control point
+                off_curve, // The next point is the end of bezier curves or another control point
+            } = .start;
+            var point_i: u16        = last_contour_end;
+            while (point_i < contour_end) : (point_i += 1) {
+                const on_curve = flags[point_i] & ON_CURVE > 0;
+
+                switch (state) {
+                    .start => {
+                        state = .on_curve;
+                    },
+                    .on_curve => {
+                        if (on_curve) {
+                            segment_count += 1;
+                        } else {
+                            state = .off_curve;
+                        }
+                    },
+                    .off_curve => {
+                        segment_count += 1;
+                        if (on_curve) {
+                            state = .on_curve;
+                        }
+                    }
+                }
+            }
+
+            var contour = try gpa.alloc(Segment, segment_count);
+            contours[contour_i] = contour;
+
+            var first_point          = Point{};
+            var first_point_on_curve = false;
+            var last_point           = Point{};
+            var last_on_curve_point  = Point{};
+            var segment_i: u16       = 0;
+            state                    = .start;
+            point_i                  = last_contour_end;
+            while (point_i < contour_end) : (point_i += 1) {
+                const on_curve = flags[point_i] & ON_CURVE > 0;
+                const point = Point{ x_coordinates[point_i], y_coordinates[point_i] };
+
+                switch (state) {
+                    .start => {
+                        first_point = point;
+                        first_point_on_curve = on_curve;
+                        state = .on_curve;
+                    },
+                    .on_curve => {
+                        if (on_curve) {
+                            contour[segment_i] = .{
+                                .line = .{
+                                    .p0 = last_on_curve_point,
+                                    .p1 = point,
+                                }
+                            };
+                            segment_i += 1;
+                        } else {
+                            state = .off_curve;
+                        }
+                    },
+                    .off_curve => {
+                        if (on_curve) {
+                            contour[segment_i] = .{
+                                .quadratic_bezier_curve = .{
+                                    .p0 = last_on_curve_point,
+                                    .p1 = last_point,
+                                    .p2 = point,
+                                }
+                            };
+                            segment_i += 1;
+                            state = .on_curve;
+                        } else {
+                            const end = Point{
+                                @divTrunc(last_point[0] + point[0], 2),
+                                @divTrunc(last_point[1] + point[1], 2),
+                            };
+                            contour[segment_i] = .{
+                                .quadratic_bezier_curve = .{
+                                    .p0 = last_on_curve_point,
+                                    .p1 = last_point,
+                                    .p2 = end,
+                                }
+                            };
+                            segment_i += 1;
+                            last_on_curve_point = end;
+                        }
+                    }
+                }
+
+                last_point = point;
+                if (on_curve) {
+                    last_on_curve_point = point;
+                }
+
+                if (point_i == contour_end - 1) {
+                    // Close the contour
+                    switch (state) {
+                        .start => {},
+                        .on_curve => {
+                            contour[segment_i] = .{
+                                .line = .{
+                                    .p0 = point,
+                                    .p1 = first_point,
+                                }
+                            };
+                            segment_i += 1;
+                        },
+                        .off_curve => {
+                            if (first_point_on_curve) {
+                                contour[segment_i] = .{
+                                    .quadratic_bezier_curve = .{
+                                        .p0 = last_on_curve_point,
+                                        .p1 = last_point,
+                                        .p2 = first_point,
+                                    }
+                                };
+                                segment_i += 1;
+                            } else {
+                                const end = Point{
+                                    @divTrunc(last_point[0] + first_point[0], 2),
+                                    @divTrunc(last_point[1] + first_point[1], 2),
+                                };
+                                contour[segment_i] = .{
+                                    .quadratic_bezier_curve = .{
+                                        .p0 = last_on_curve_point,
+                                        .p1 = last_point,
+                                        .p2 = end,
+                                    }
+                                };
+                                segment_i += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return Glyph{
+            .gpa = gpa,
+            .x_min = x_min,
+            .y_min = y_min,
+            .x_max = x_max,
+            .y_max = y_max,
+            .contours = contours,
+        };
+    }
+
+    fn deinit(glyph: Glyph) void {
+        for (glyph.contours) |contour| {
+            glyph.gpa.free(contour);
+        }
+        glyph.gpa.free(glyph.contours);
+    }
+};
 
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -442,7 +724,7 @@ pub fn main() !void {
     try font_file.seekBy(-@sizeOf(u16));
     var cmap = try CmapFormat4.init(arena, font_file.seekableStream(), reader);
     defer cmap.deinit();
-    const codepoint = 'D';
+    const codepoint = 'B';
     const glyph_index = cmap.codepointToGlyphIndex(codepoint);
     std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
 
@@ -463,64 +745,99 @@ pub fn main() !void {
         return error.InvalidFontFile;
     };
     try font_file.seekTo(glyf_table_directory_entry.offset + glyph_location.offset);
-    const number_of_contours_i16 = try reader.readIntBig(i16);
-    std.debug.print("The glyph has number_of_contours of {d}\n", .{ number_of_contours_i16 });
-    if (number_of_contours_i16 < 0) {
-        std.debug.print("The glyph is a compound glyph, which are not supported\n", .{});
-        return error.UnsupportedGlyph;
+    const glyph = try Glyph.init(arena, reader);
+    defer glyph.deinit();
+
+
+    if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
+        logSdlError("SDL_Init", @src());
+        return error.SDLInitFailed;
     }
-    const number_of_contours = @intCast(u16, number_of_contours_i16);
+    defer c.SDL_Quit();
 
-    try font_file.seekBy(4 * 2); // Skip glyph bounds
-    var end_points_of_contours = try arena.alloc(u16, number_of_contours);
-    defer arena.free(end_points_of_contours);
-    var points_length: u16 = 0;
-    for (end_points_of_contours) |*end_point| {
-        end_point.* = try reader.readIntBig(u16);
-        if (end_point.* > points_length) points_length = end_point.*;
-    }
-    if (number_of_contours > 0) {
-        points_length += 1;
-    }
-    std.debug.print("End points of contours: {any}, points_length: {d}\n", .{ end_points_of_contours, points_length });
+    const window = c.SDL_CreateWindow(
+        "Hello World!",
+        c.SDL_WINDOWPOS_UNDEFINED, c.SDL_WINDOWPOS_UNDEFINED,
+        800, 600,
+        c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE
+    ) orelse {
+        logSdlError("SDL_CreateWindow", @src());
+        return error.SDLCreateWindowFailed;
+    };
+    defer c.SDL_DestroyWindow(window);
 
-    const instruction_length = try reader.readIntBig(u16);
-    try font_file.seekBy(instruction_length * @sizeOf(u8));
+    const renderer = c.SDL_CreateRenderer(window, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_TARGETTEXTURE) orelse {
+        logSdlError("SDL_CreateRenderer", @src());
+        return error.SDLCreateRendererFailed;
+    };
+    defer c.SDL_DestroyRenderer(renderer);
 
-    //const ON_CURVE          : u8 = 0b00000001;
-    const X_IS_SHORT        : u8 = 0b00000010;
-    const Y_IS_SHORT        : u8 = 0b00000100;
-    const REPEAT            : u8 = 0b00001000;
-    const X_SAME_OR_POSITIVE: u8 = 0b00010000;
-    const Y_SAME_OR_POSITIVE: u8 = 0b00100000;
-    var flags = try arena.alloc(u8, points_length);
-    defer arena.free(flags);
-    var flag_i: u16 = 0;
-    while (flag_i < points_length) : (flag_i += 1) {
-        const flag = try reader.readIntBig(u8);
-        flags[flag_i] = flag;
+    const high_dpi_factor = try getHighDpiFactor(window, renderer);
+    _ = high_dpi_factor;
 
-        if (flag & REPEAT > 0) {
-            var repeat_count = try reader.readIntBig(u8);
-            while (repeat_count > 0) : (repeat_count -= 1) {
-                flag_i += 1;
-                if (flag_i >= points_length) {
-                    return error.InvalidGlyph;
-                }
-                flags[flag_i] = flag;
+    var quit = false;
+    while (!quit) {
+        var event: c.SDL_Event = undefined;
+        while (c.SDL_PollEvent(&event) != 0) {
+            switch (event.type) {
+                c.SDL_QUIT => quit = true,
+                c.SDL_KEYDOWN => {
+                    if (event.key.keysym.sym == c.SDLK_ESCAPE) {
+                        quit = true;
+                    }
+                },
+                else => {},
             }
         }
+
+        var window_width: c_int = undefined;
+        var window_height: c_int = undefined;
+        if (c.SDL_GetRendererOutputSize(renderer, &window_width, &window_height) != 0) {
+            logSdlError("SDL_GetRendererOutputSize", @src());
+            return error.GetRendererOutputSizeFailed;
+        }
+
+        if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
+            logSdlError("SDL_SetRenderDrawColor", @src());
+            return error.SetRenderDrawColorFailed;
+        }
+
+        if (c.SDL_RenderClear(renderer) != 0) {
+            logSdlError("SDL_RenderClear", @src());
+            return error.RenderClearFailed;
+        }
+
+        if (c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255) != 0) {
+            logSdlError("SDL_SetRenderDrawColor", @src());
+            return error.SetRenderDrawColorFailed;
+        }
+
+        const x0 = 100 - glyph.x_min;
+        const y0 = 100 - glyph.y_min;
+        for (glyph.contours) |contour| {
+            for (contour) |segment| {
+                switch (segment) {
+                    .line => |line| {
+                        if (c.SDL_RenderDrawLine(renderer, x0 + line.p0[0], y0 - line.p0[1] + glyph.y_max, x0 + line.p1[0], y0 - line.p1[1] + glyph.y_max) != 0) {
+                            logSdlError("SDL_RenderDrawLine", @src());
+                            return error.RenderDrawLineFailed;
+                        }
+                    },
+                    .quadratic_bezier_curve => |curve| {
+                        if (c.SDL_RenderDrawLine(renderer, x0 + curve.p0[0], y0 - curve.p0[1] + glyph.y_max, x0 + curve.p2[0], y0 - curve.p2[1] + glyph.y_max) != 0) {
+                            logSdlError("SDL_RenderDrawLine", @src());
+                            return error.RenderDrawLineFailed;
+                        }
+                        if (c.SDL_RenderDrawPoint(renderer, x0 + curve.p1[0], y0 - curve.p1[1] + glyph.y_max) != 0) {
+                            logSdlError("SDL_RenderDrawPoint", @src());
+                            return error.RenderDrawPointFailed;
+                        }
+                    },
+                }
+            }
+        }
+
+        c.SDL_RenderPresent(renderer);
     }
-    std.debug.print("Glyph flags: {any}\n", .{ flags });
-
-    var x_coordinates: []i32 = try arena.alloc(i32, points_length);
-    defer arena.free(x_coordinates);
-    try readCoordinates(reader, flags, x_coordinates, X_IS_SHORT, X_SAME_OR_POSITIVE);
-    std.debug.print("x_coordinates: {any}\n", .{ x_coordinates });
-
-    var y_coordinates: []i32 = try arena.alloc(i32, points_length);
-    defer arena.free(y_coordinates);
-    try readCoordinates(reader, flags, y_coordinates, Y_IS_SHORT, Y_SAME_OR_POSITIVE);
-    std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
 }
 
