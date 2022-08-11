@@ -348,22 +348,12 @@ fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i16, IS_SHORT: u
 }
 
 const Glyph = struct {
-    const Point = std.meta.Vector(2, i16);
-
-    const Line = struct {
-        p0: Point,
-        p1: Point,
-    };
+    const Point = std.meta.Vector(2, f32);
 
     const QuadraticBezierCurve = struct {
         p0: Point,
         p1: Point,
         p2: Point,
-    };
-
-    const Segment = union(enum) {
-        line                  : Line,
-        quadratic_bezier_curve: QuadraticBezierCurve,
     };
 
     gpa: Allocator,
@@ -373,7 +363,7 @@ const Glyph = struct {
     x_max: i16,
     y_max: i16,
 
-    contours: [][]Segment,
+    contours: [][]QuadraticBezierCurve,
 
     fn init(gpa: Allocator, reader: anytype) !Glyph {
         const number_of_contours_i16 = try reader.readIntBig(i16);
@@ -383,7 +373,7 @@ const Glyph = struct {
             return error.UnsupportedGlyph;
         }
         const number_of_contours = @intCast(u16, number_of_contours_i16);
-        var contours = try gpa.alloc([]Segment, number_of_contours);
+        var contours = try gpa.alloc([]QuadraticBezierCurve, number_of_contours);
         errdefer gpa.free(contours);
 
         const x_min = try reader.readIntBig(i16);
@@ -483,7 +473,7 @@ const Glyph = struct {
                 }
             }
 
-            var contour = try gpa.alloc(Segment, segment_count);
+            var contour = try gpa.alloc(QuadraticBezierCurve, segment_count);
             contours[contour_i] = contour;
 
             var first_point          = Point{};
@@ -495,7 +485,10 @@ const Glyph = struct {
             point_i                  = last_contour_end;
             while (point_i < contour_end) : (point_i += 1) {
                 const on_curve = flags[point_i] & ON_CURVE > 0;
-                const point = Point{ x_coordinates[point_i], y_coordinates[point_i] };
+                const point = Point{
+                    @intToFloat(f32, x_coordinates[point_i]),
+                    @intToFloat(f32, y_coordinates[point_i])
+                };
 
                 switch (state) {
                     .start => {
@@ -506,10 +499,9 @@ const Glyph = struct {
                     .on_curve => {
                         if (on_curve) {
                             contour[segment_i] = .{
-                                .line = .{
-                                    .p0 = last_on_curve_point,
-                                    .p1 = point,
-                                }
+                                .p0 = last_on_curve_point,
+                                .p1 = (last_on_curve_point + point) / @splat(2, @as(f32, 2)),
+                                .p2 = point,
                             };
                             segment_i += 1;
                         } else {
@@ -519,25 +511,18 @@ const Glyph = struct {
                     .off_curve => {
                         if (on_curve) {
                             contour[segment_i] = .{
-                                .quadratic_bezier_curve = .{
-                                    .p0 = last_on_curve_point,
-                                    .p1 = last_point,
-                                    .p2 = point,
-                                }
+                                .p0 = last_on_curve_point,
+                                .p1 = last_point,
+                                .p2 = point,
                             };
                             segment_i += 1;
                             state = .on_curve;
                         } else {
-                            const end = Point{
-                                @divTrunc(last_point[0] + point[0], 2),
-                                @divTrunc(last_point[1] + point[1], 2),
-                            };
+                            const end = (last_point + point) / @splat(2, @as(f32, 2));
                             contour[segment_i] = .{
-                                .quadratic_bezier_curve = .{
-                                    .p0 = last_on_curve_point,
-                                    .p1 = last_point,
-                                    .p2 = end,
-                                }
+                                .p0 = last_on_curve_point,
+                                .p1 = last_point,
+                                .p2 = end,
                             };
                             segment_i += 1;
                             last_on_curve_point = end;
@@ -556,34 +541,26 @@ const Glyph = struct {
                         .start => {},
                         .on_curve => {
                             contour[segment_i] = .{
-                                .line = .{
-                                    .p0 = point,
-                                    .p1 = first_point,
-                                }
+                                .p0 = point,
+                                .p1 = (point + first_point) / @splat(2, @as(f32, 2)),
+                                .p2 = first_point,
                             };
                             segment_i += 1;
                         },
                         .off_curve => {
                             if (first_point_on_curve) {
                                 contour[segment_i] = .{
-                                    .quadratic_bezier_curve = .{
-                                        .p0 = last_on_curve_point,
-                                        .p1 = last_point,
-                                        .p2 = first_point,
-                                    }
+                                    .p0 = last_on_curve_point,
+                                    .p1 = last_point,
+                                    .p2 = first_point,
                                 };
                                 segment_i += 1;
                             } else {
-                                const end = Point{
-                                    @divTrunc(last_point[0] + first_point[0], 2),
-                                    @divTrunc(last_point[1] + first_point[1], 2),
-                                };
+                                const end = (last_point + first_point) / @splat(2, @as(f32, 2));
                                 contour[segment_i] = .{
-                                    .quadratic_bezier_curve = .{
-                                        .p0 = last_on_curve_point,
-                                        .p1 = last_point,
-                                        .p2 = end,
-                                    }
+                                    .p0 = last_on_curve_point,
+                                    .p1 = last_point,
+                                    .p2 = end,
                                 };
                                 segment_i += 1;
                             }
@@ -812,27 +789,18 @@ pub fn main() !void {
             return error.SetRenderDrawColorFailed;
         }
 
-        const x0 = 100 - glyph.x_min;
-        const y0 = 100 - glyph.y_min;
+        const x0 = 100 - @intToFloat(f32, glyph.x_min);
+        const y0 = 100 - @intToFloat(f32, glyph.y_min);
+        const y_max =    @intToFloat(f32, glyph.y_max);
         for (glyph.contours) |contour| {
             for (contour) |segment| {
-                switch (segment) {
-                    .line => |line| {
-                        if (c.SDL_RenderDrawLine(renderer, x0 + line.p0[0], y0 - line.p0[1] + glyph.y_max, x0 + line.p1[0], y0 - line.p1[1] + glyph.y_max) != 0) {
-                            logSdlError("SDL_RenderDrawLine", @src());
-                            return error.RenderDrawLineFailed;
-                        }
-                    },
-                    .quadratic_bezier_curve => |curve| {
-                        if (c.SDL_RenderDrawLine(renderer, x0 + curve.p0[0], y0 - curve.p0[1] + glyph.y_max, x0 + curve.p2[0], y0 - curve.p2[1] + glyph.y_max) != 0) {
-                            logSdlError("SDL_RenderDrawLine", @src());
-                            return error.RenderDrawLineFailed;
-                        }
-                        if (c.SDL_RenderDrawPoint(renderer, x0 + curve.p1[0], y0 - curve.p1[1] + glyph.y_max) != 0) {
-                            logSdlError("SDL_RenderDrawPoint", @src());
-                            return error.RenderDrawPointFailed;
-                        }
-                    },
+                if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0], y0 - segment.p0[1] + y_max, x0 + segment.p2[0], y0 - segment.p2[1] + y_max) != 0) {
+                    logSdlError("SDL_RenderDrawLineF", @src());
+                    return error.RenderDrawLineFailed;
+                }
+                if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0], y0 - segment.p1[1] + y_max) != 0) {
+                    logSdlError("SDL_RenderDrawPointF", @src());
+                    return error.RenderDrawPointFailed;
                 }
             }
         }
