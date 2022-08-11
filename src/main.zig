@@ -354,6 +354,20 @@ const Glyph = struct {
         p0: Point,
         p1: Point,
         p2: Point,
+
+        fn windingDelta(b: QuadraticBezierCurve, p: Point) i16 {
+            const denominator = b.p2[1] - b.p0[1];
+            if (std.math.absFloat(denominator) < std.math.epsilon(@TypeOf(denominator))) return 0;
+
+            const nominator = p[1] - b.p0[1];
+            const u = nominator / denominator;
+            if (u < 0 or u > 1) return 0;
+
+            const t = b.p0[0] - p[0] + u*(b.p2[0] - b.p0[0]);
+            if (t < 0) return 0;
+
+            return if (b.p0[1] < b.p2[1]) 1 else -1;
+        }
     };
 
     gpa: Allocator,
@@ -586,6 +600,21 @@ const Glyph = struct {
         }
         glyph.gpa.free(glyph.contours);
     }
+
+    fn inside(glyph: Glyph, x: f32, y: f32) bool {
+        if (x < @intToFloat(f32, glyph.x_min) or y < @intToFloat(f32, glyph.y_min) or
+            x > @intToFloat(f32, glyph.x_max) or y > @intToFloat(f32, glyph.y_max)) {
+            return false;
+        }
+
+        var winding: i16 = 0;
+        for (glyph.contours) |contour| {
+            for (contour) |segment| {
+                winding += segment.windingDelta(.{ x, y });
+            }
+        }
+        return winding != 0;
+    }
 };
 
 pub fn main() !void {
@@ -774,7 +803,7 @@ pub fn main() !void {
             return error.GetRendererOutputSizeFailed;
         }
 
-        if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
+        if (c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255) != 0) {
             logSdlError("SDL_SetRenderDrawColor", @src());
             return error.SetRenderDrawColorFailed;
         }
@@ -784,14 +813,33 @@ pub fn main() !void {
             return error.RenderClearFailed;
         }
 
+        const x0 = 100 - @intToFloat(f32, glyph.x_min);
+        const y0 = 100 - @intToFloat(f32, glyph.y_min);
+        //const x_max =    @intToFloat(f32, glyph.x_max);
+        const y_max =    @intToFloat(f32, glyph.y_max);
+
+        if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
+            logSdlError("SDL_SetRenderDrawColor", @src());
+            return error.SetRenderDrawColorFailed;
+        }
+
+        var y = glyph.y_min;
+        while (y <= glyph.y_max) : (y += 1) {
+            var x = glyph.x_min;
+            while (x <= glyph.x_max) : (x += 1) {
+                const draw = glyph.inside(@intToFloat(f32, x), @intToFloat(f32, y));
+                if (draw and c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
+                    logSdlError("SDL_RenderDrawPoint", @src());
+                    return error.RenderDrawPointFailed;
+                }
+            }
+        }
+
         if (c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255) != 0) {
             logSdlError("SDL_SetRenderDrawColor", @src());
             return error.SetRenderDrawColorFailed;
         }
 
-        const x0 = 100 - @intToFloat(f32, glyph.x_min);
-        const y0 = 100 - @intToFloat(f32, glyph.y_min);
-        const y_max =    @intToFloat(f32, glyph.y_max);
         for (glyph.contours) |contour| {
             for (contour) |segment| {
                 if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0], y0 - segment.p0[1] + y_max, x0 + segment.p2[0], y0 - segment.p2[1] + y_max) != 0) {
