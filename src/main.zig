@@ -355,7 +355,11 @@ const Glyph = struct {
         p1: Point,
         p2: Point,
 
-        fn windingDelta(b: QuadraticBezierCurve, p: Point) i16 {
+        fn sampleY(b: QuadraticBezierCurve, t: f32) f32 {
+            return t*t * (b.p0[1] - 2*b.p1[1] + b.p2[1]) + t * (2*b.p1[1] - 2*b.p0[1]) + b.p0[1];
+        }
+
+        fn windingDeltaLine(b: QuadraticBezierCurve, p: Point) i16 {
             const denominator = b.p2[1] - b.p0[1];
             if (std.math.absFloat(denominator) < std.math.epsilon(@TypeOf(denominator))) return 0;
 
@@ -368,6 +372,50 @@ const Glyph = struct {
 
             return if (b.p0[1] < b.p2[1]) 1 else -1;
         }
+
+        // Adapted from https://git.outerproduct.net/dconf2021-ff.git/
+        fn windingDelta(curve: QuadraticBezierCurve, loc: Point) i16 {
+            const p0 = curve.p0;
+            const p1 = curve.p1;
+            const p2 = curve.p2;
+
+            const a = p0[0] - 2*p1[0] + p2[0];
+            const b = 2*p1[0] - 2*p0[0];
+            const c_ = p0[0] - loc[0];
+            const det = b*b - 4*a*c_;
+            var res = Point{
+                (-b - std.math.sqrt(det)) / (2 * a),
+                (-b + std.math.sqrt(det)) / (2 * a),
+            };
+
+            var valid_x = det >= 0;
+            var valid_y = det >= 0;
+            if (std.math.absFloat(a) < 1e-3) {
+                res[0] = -c_ / b;
+                res[1] = res[0];
+                valid_x = true;
+                valid_y = true;
+            }
+
+            valid_x = valid_x and (curve.sampleY(res[0]) < loc[1]);
+            valid_y = valid_y and (curve.sampleY(res[1]) < loc[1]);
+
+            var ret: i16 = 0;
+            var shift: u5 = 0;
+            if (p0[0] > loc[0]) shift += 2;
+            if (p1[0] > loc[0]) shift += 4;
+            if (p2[0] > loc[0]) shift += 8;
+            const klass = @as(i32, 0x2E74) >> shift;
+            if ((klass & 1) != 0 and valid_x) {
+                ret += 1;
+            }
+            if ((klass & 2) != 0 and valid_y) {
+                ret -= 1;
+            }
+
+            return ret;
+        }
+
     };
 
     gpa: Allocator,
@@ -514,7 +562,8 @@ const Glyph = struct {
                         if (on_curve) {
                             contour[segment_i] = .{
                                 .p0 = last_on_curve_point,
-                                .p1 = (last_on_curve_point + point) / @splat(2, @as(f32, 2)),
+                                //.p1 = (last_on_curve_point + point) / @splat(2, @as(f32, 2)),
+                                .p1 = last_on_curve_point,
                                 .p2 = point,
                             };
                             segment_i += 1;
@@ -556,7 +605,8 @@ const Glyph = struct {
                         .on_curve => {
                             contour[segment_i] = .{
                                 .p0 = point,
-                                .p1 = (point + first_point) / @splat(2, @as(f32, 2)),
+                                //.p1 = (point + first_point) / @splat(2, @as(f32, 2)),
+                                .p1 = point,
                                 .p2 = first_point,
                             };
                             segment_i += 1;
@@ -816,7 +866,7 @@ pub fn main() !void {
         const x0 = 100 - @intToFloat(f32, glyph.x_min);
         const y0 = 100 - @intToFloat(f32, glyph.y_min);
         //const x_max =    @intToFloat(f32, glyph.x_max);
-        const y_max =    @intToFloat(f32, glyph.y_max);
+        //const y_max =    @intToFloat(f32, glyph.y_max);
 
         if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
             logSdlError("SDL_SetRenderDrawColor", @src());
@@ -827,7 +877,7 @@ pub fn main() !void {
         while (y <= glyph.y_max) : (y += 1) {
             var x = glyph.x_min;
             while (x <= glyph.x_max) : (x += 1) {
-                const draw = glyph.inside(@intToFloat(f32, x), @intToFloat(f32, y));
+                const draw = glyph.inside(@intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5);
                 if (draw and c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
                     logSdlError("SDL_RenderDrawPoint", @src());
                     return error.RenderDrawPointFailed;
@@ -835,23 +885,23 @@ pub fn main() !void {
             }
         }
 
-        if (c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255) != 0) {
-            logSdlError("SDL_SetRenderDrawColor", @src());
-            return error.SetRenderDrawColorFailed;
-        }
+        //if (c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255) != 0) {
+            //logSdlError("SDL_SetRenderDrawColor", @src());
+            //return error.SetRenderDrawColorFailed;
+        //}
 
-        for (glyph.contours) |contour| {
-            for (contour) |segment| {
-                if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0], y0 - segment.p0[1] + y_max, x0 + segment.p2[0], y0 - segment.p2[1] + y_max) != 0) {
-                    logSdlError("SDL_RenderDrawLineF", @src());
-                    return error.RenderDrawLineFailed;
-                }
-                if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0], y0 - segment.p1[1] + y_max) != 0) {
-                    logSdlError("SDL_RenderDrawPointF", @src());
-                    return error.RenderDrawPointFailed;
-                }
-            }
-        }
+        //for (glyph.contours) |contour| {
+            //for (contour) |segment| {
+                //if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0] + 0.5, y0 - segment.p0[1] + y_max + 0.5, x0 + segment.p2[0] + 0.5, y0 - segment.p2[1] + y_max + 0.5) != 0) {
+                    //logSdlError("SDL_RenderDrawLineF", @src());
+                    //return error.RenderDrawLineFailed;
+                //}
+                //if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0] + 0.5, y0 - segment.p1[1] + y_max + 0.5) != 0) {
+                    //logSdlError("SDL_RenderDrawPointF", @src());
+                    //return error.RenderDrawPointFailed;
+                //}
+            //}
+        //}
 
         c.SDL_RenderPresent(renderer);
     }
