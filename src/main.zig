@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const gl = @import("gl");
 const c = @import("c.zig");
 
 const Allocator = std.mem.Allocator;
@@ -29,6 +30,16 @@ fn getHighDpiFactor(window: *c.SDL_Window, renderer: *c.SDL_Renderer) !f32 {
         logSdlError("SDL_GetRendererOutputSize", @src());
         return error.GetRenderOutputSizeFailed;
     }
+
+    return @intToFloat(f32, drawable_width) / @intToFloat(f32, window_width);
+}
+
+fn getHighDpiFactorGL(window: *c.SDL_Window) f32 {
+    var window_width: i32 = undefined;
+    c.SDL_GetWindowSize(window, &window_width, null);
+
+    var drawable_width: i32 = undefined;
+    c.SDL_GL_GetDrawableSize(window, &drawable_width, null);
 
     return @intToFloat(f32, drawable_width) / @intToFloat(f32, window_width);
 }
@@ -732,6 +743,11 @@ const Glyph = struct {
     }
 };
 
+fn glGetProcAddress(window: *c.SDL_Window, proc: [:0]const u8) ?*const anyopaque {
+    _ = window;
+    return c.SDL_GL_GetProcAddress(proc);
+}
+
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -876,24 +892,64 @@ pub fn main() !void {
     }
     defer c.SDL_Quit();
 
+    if (c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1) != 0) {
+        logSdlError("SDL_GL_SetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    if (c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE) != 0) {
+        logSdlError("SDL_GL_SetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    if (c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, 4) != 0) {
+        logSdlError("SDL_GL_SetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    if (c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 1) != 0) {
+        logSdlError("SDL_GL_SetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+
     const window = c.SDL_CreateWindow(
         "Hello World!",
         c.SDL_WINDOWPOS_UNDEFINED, c.SDL_WINDOWPOS_UNDEFINED,
         800, 600,
-        c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE
+        c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_OPENGL,
     ) orelse {
         logSdlError("SDL_CreateWindow", @src());
         return error.SDLCreateWindowFailed;
     };
     defer c.SDL_DestroyWindow(window);
 
-    const renderer = c.SDL_CreateRenderer(window, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_TARGETTEXTURE) orelse {
-        logSdlError("SDL_CreateRenderer", @src());
-        return error.SDLCreateRendererFailed;
+    const gl_context = c.SDL_GL_CreateContext(window) orelse {
+        logSdlError("SDL_GL_CreateContext", @src());
+        return error.SDLGLCreateContextFailed;
     };
-    defer c.SDL_DestroyRenderer(renderer);
+    defer c.SDL_GL_DeleteContext(gl_context);
 
-    const high_dpi_factor = try getHighDpiFactor(window, renderer);
+    var major_version: c_int = undefined;
+    if (c.SDL_GL_GetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, &major_version) != 0) {
+        logSdlError("SDL_GL_GetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    var minor_version: c_int = undefined;
+    if (c.SDL_GL_GetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, &minor_version) != 0) {
+        logSdlError("SDL_GL_GetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    std.debug.print("OpenGL version {d}.{d}\n", .{ major_version, minor_version });
+
+    try gl.load(window, glGetProcAddress);
+
+    //const renderer = c.SDL_CreateRenderer(window, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_TARGETTEXTURE) orelse {
+        //logSdlError("SDL_CreateRenderer", @src());
+        //return error.SDLCreateRendererFailed;
+    //};
+    //defer c.SDL_DestroyRenderer(renderer);
+
+    //const high_dpi_factor = try getHighDpiFactor(window, renderer);
+    //_ = high_dpi_factor;
+
+    const high_dpi_factor = getHighDpiFactorGL(window);
     _ = high_dpi_factor;
 
     var quit = false;
@@ -911,54 +967,52 @@ pub fn main() !void {
             }
         }
 
-        var window_width: c_int = undefined;
-        var window_height: c_int = undefined;
-        if (c.SDL_GetRendererOutputSize(renderer, &window_width, &window_height) != 0) {
-            logSdlError("SDL_GetRendererOutputSize", @src());
-            return error.GetRendererOutputSizeFailed;
-        }
+        gl.clearColor(1, 1, 1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
 
-        if (c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255) != 0) {
-            logSdlError("SDL_SetRenderDrawColor", @src());
-            return error.SetRenderDrawColorFailed;
-        }
+        c.SDL_GL_SwapWindow(window);
 
-        if (c.SDL_RenderClear(renderer) != 0) {
-            logSdlError("SDL_RenderClear", @src());
-            return error.RenderClearFailed;
-        }
+        //if (c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255) != 0) {
+            //logSdlError("SDL_SetRenderDrawColor", @src());
+            //return error.SetRenderDrawColorFailed;
+        //}
 
-        const x0 = 100 - @intToFloat(f32, glyph.x_min);
-        const y0 = 100 - @intToFloat(f32, glyph.y_min);
-        //const x_max =    @intToFloat(f32, glyph.x_max);
-        //const y_max =    @intToFloat(f32, glyph.y_max);
+        //if (c.SDL_RenderClear(renderer) != 0) {
+            //logSdlError("SDL_RenderClear", @src());
+            //return error.RenderClearFailed;
+        //}
 
-        if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
-            logSdlError("SDL_SetRenderDrawColor", @src());
-            return error.SetRenderDrawColorFailed;
-        }
+        //const x0 = 100 - @intToFloat(f32, glyph.x_min);
+        //const y0 = 100 - @intToFloat(f32, glyph.y_min);
+        ////const x_max =    @intToFloat(f32, glyph.x_max);
+        ////const y_max =    @intToFloat(f32, glyph.y_max);
 
-        var y = glyph.y_min;
-        while (y <= glyph.y_max) : (y += 1) {
-            var x = glyph.x_min;
-            while (x <= glyph.x_max) : (x += 1) {
-                const center = Vector(2, f32){ @intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5 };
-                const sd = glyph.approximateSignedDistance(center);
+        //if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
+            //logSdlError("SDL_SetRenderDrawColor", @src());
+            //return error.SetRenderDrawColorFailed;
+        //}
 
-                const color = 255 - @floatToInt(u8, 255*std.math.clamp(0.5 - sd, 0, 1));
-                if (c.SDL_SetRenderDrawColor(renderer, color, color, color, 255) != 0) {
-                    logSdlError("SDL_SetRenderDrawColor", @src());
-                    return error.SetRenderDrawColorFailed;
-                }
+        //var y = glyph.y_min;
+        //while (y <= glyph.y_max) : (y += 1) {
+            //var x = glyph.x_min;
+            //while (x <= glyph.x_max) : (x += 1) {
+                //const center = Vector(2, f32){ @intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5 };
+                //const sd = glyph.approximateSignedDistance(center);
 
-                if (c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
-                    logSdlError("SDL_RenderDrawPoint", @src());
-                    return error.RenderDrawPointFailed;
-                }
-            }
-        }
+                //const color = 255 - @floatToInt(u8, 255*std.math.clamp(0.5 - sd, 0, 1));
+                //if (c.SDL_SetRenderDrawColor(renderer, color, color, color, 255) != 0) {
+                    //logSdlError("SDL_SetRenderDrawColor", @src());
+                    //return error.SetRenderDrawColorFailed;
+                //}
 
-        c.SDL_RenderPresent(renderer);
+                //if (c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
+                    //logSdlError("SDL_RenderDrawPoint", @src());
+                    //return error.RenderDrawPointFailed;
+                //}
+            //}
+        //}
+
+        //c.SDL_RenderPresent(renderer);
     }
 }
 
