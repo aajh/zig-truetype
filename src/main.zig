@@ -425,7 +425,7 @@ const Glyph = struct {
     x_max: i16,
     y_max: i16,
 
-    contours: [][]QuadraticBezierCurve,
+    segments: []QuadraticBezierCurve,
 
     fn init(gpa: Allocator, reader: anytype) !Glyph {
         const number_of_contours_i16 = try reader.readIntBig(i16);
@@ -496,21 +496,18 @@ const Glyph = struct {
         std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
 
         var last_contour_end: u16 = 0;
+        var segment_count: u16 = 0;
+        var state: enum {
+            start,
+            on_curve, // The next point is the end of a straight line or a control point
+            off_curve, // The next point is the end of bezier curves or another control point
+        } = .start;
         var contour_i: u16        = 0;
-        errdefer for (contours) |contour, i| {
-            if (i > contour_i) break;
-            gpa.free(contour);
-        };
         while (contour_i < number_of_contours) : (contour_i += 1) {
             const contour_end = end_points_of_contours[contour_i] + 1;
             defer last_contour_end = contour_end;
 
-            var segment_count: u16 = 1; // 1 is for the segment that closes the contour
-            var state: enum {
-                start,
-                on_curve, // The next point is the end of a straight line or a control point
-                off_curve, // The next point is the end of bezier curves or another control point
-            } = .start;
+            state = .start;
             var point_i: u16        = last_contour_end;
             while (point_i < contour_end) : (point_i += 1) {
                 const on_curve = flags[point_i] & ON_CURVE > 0;
@@ -534,17 +531,25 @@ const Glyph = struct {
                     }
                 }
             }
+            segment_count += 1; // 1 is for the segment that closes the contour
+        }
 
-            var contour = try gpa.alloc(QuadraticBezierCurve, segment_count);
-            contours[contour_i] = contour;
+        var segments = try gpa.alloc(QuadraticBezierCurve, segment_count);
+        errdefer gpa.free(segments);
+
+        var segment_i: u16 = 0;
+        last_contour_end   = 0;
+        contour_i          = 0;
+        while (contour_i < number_of_contours) : (contour_i += 1) {
+            const contour_end = end_points_of_contours[contour_i] + 1;
+            defer last_contour_end = contour_end;
 
             var first_point          = Point{};
             var first_point_on_curve = false;
             var last_point           = Point{};
             var last_on_curve_point  = Point{};
-            var segment_i: u16       = 0;
             state                    = .start;
-            point_i                  = last_contour_end;
+            var point_i: u16         = last_contour_end;
             while (point_i < contour_end) : (point_i += 1) {
                 const on_curve = flags[point_i] & ON_CURVE > 0;
                 const point = Point{
@@ -560,7 +565,7 @@ const Glyph = struct {
                     },
                     .on_curve => {
                         if (on_curve) {
-                            contour[segment_i] = .{
+                            segments[segment_i] = .{
                                 .p0 = last_on_curve_point,
                                 //.p1 = (last_on_curve_point + point) / @splat(2, @as(f32, 2)),
                                 .p1 = last_on_curve_point,
@@ -573,7 +578,7 @@ const Glyph = struct {
                     },
                     .off_curve => {
                         if (on_curve) {
-                            contour[segment_i] = .{
+                            segments[segment_i] = .{
                                 .p0 = last_on_curve_point,
                                 .p1 = last_point,
                                 .p2 = point,
@@ -582,7 +587,7 @@ const Glyph = struct {
                             state = .on_curve;
                         } else {
                             const end = (last_point + point) / @splat(2, @as(f32, 2));
-                            contour[segment_i] = .{
+                            segments[segment_i] = .{
                                 .p0 = last_on_curve_point,
                                 .p1 = last_point,
                                 .p2 = end,
@@ -603,7 +608,7 @@ const Glyph = struct {
                     switch (state) {
                         .start => {},
                         .on_curve => {
-                            contour[segment_i] = .{
+                            segments[segment_i] = .{
                                 .p0 = point,
                                 //.p1 = (point + first_point) / @splat(2, @as(f32, 2)),
                                 .p1 = point,
@@ -613,7 +618,7 @@ const Glyph = struct {
                         },
                         .off_curve => {
                             if (first_point_on_curve) {
-                                contour[segment_i] = .{
+                                segments[segment_i] = .{
                                     .p0 = last_on_curve_point,
                                     .p1 = last_point,
                                     .p2 = first_point,
@@ -621,7 +626,7 @@ const Glyph = struct {
                                 segment_i += 1;
                             } else {
                                 const end = (last_point + first_point) / @splat(2, @as(f32, 2));
-                                contour[segment_i] = .{
+                                segments[segment_i] = .{
                                     .p0 = last_on_curve_point,
                                     .p1 = last_point,
                                     .p2 = end,
@@ -640,15 +645,12 @@ const Glyph = struct {
             .y_min = y_min,
             .x_max = x_max,
             .y_max = y_max,
-            .contours = contours,
+            .segments = segments,
         };
     }
 
     fn deinit(glyph: Glyph) void {
-        for (glyph.contours) |contour| {
-            glyph.gpa.free(contour);
-        }
-        glyph.gpa.free(glyph.contours);
+        glyph.gpa.free(glyph.segments);
     }
 
     fn inside(glyph: Glyph, x: f32, y: f32) bool {
@@ -658,10 +660,8 @@ const Glyph = struct {
         }
 
         var winding: i16 = 0;
-        for (glyph.contours) |contour| {
-            for (contour) |segment| {
-                winding += segment.windingDelta(.{ x, y });
-            }
+        for (glyph.segments) |segment| {
+            winding += segment.windingDelta(.{ x, y });
         }
         return winding != 0;
     }
@@ -890,16 +890,14 @@ pub fn main() !void {
             //return error.SetRenderDrawColorFailed;
         //}
 
-        //for (glyph.contours) |contour| {
-            //for (contour) |segment| {
-                //if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0] + 0.5, y0 - segment.p0[1] + y_max + 0.5, x0 + segment.p2[0] + 0.5, y0 - segment.p2[1] + y_max + 0.5) != 0) {
-                    //logSdlError("SDL_RenderDrawLineF", @src());
-                    //return error.RenderDrawLineFailed;
-                //}
-                //if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0] + 0.5, y0 - segment.p1[1] + y_max + 0.5) != 0) {
-                    //logSdlError("SDL_RenderDrawPointF", @src());
-                    //return error.RenderDrawPointFailed;
-                //}
+        //for (glyhp.segments) |segment| {
+            //if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0] + 0.5, y0 - segment.p0[1] + y_max + 0.5, x0 + segment.p2[0] + 0.5, y0 - segment.p2[1] + y_max + 0.5) != 0) {
+                //logSdlError("SDL_RenderDrawLineF", @src());
+                //return error.RenderDrawLineFailed;
+            //}
+            //if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0] + 0.5, y0 - segment.p1[1] + y_max + 0.5) != 0) {
+                //logSdlError("SDL_RenderDrawPointF", @src());
+                //return error.RenderDrawPointFailed;
             //}
         //}
 
