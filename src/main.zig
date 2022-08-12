@@ -886,16 +886,14 @@ pub fn main() !void {
     defer glyph.deinit();
 
 
+    std.debug.print("\n", .{});
+
     if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
         logSdlError("SDL_Init", @src());
         return error.SDLInitFailed;
     }
     defer c.SDL_Quit();
 
-    if (c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1) != 0) {
-        logSdlError("SDL_GL_SetAttribute", @src());
-        return error.SDLGLSetAttributeFailed;
-    }
     if (c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE) != 0) {
         logSdlError("SDL_GL_SetAttribute", @src());
         return error.SDLGLSetAttributeFailed;
@@ -905,6 +903,10 @@ pub fn main() !void {
         return error.SDLGLSetAttributeFailed;
     }
     if (c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 1) != 0) {
+        logSdlError("SDL_GL_SetAttribute", @src());
+        return error.SDLGLSetAttributeFailed;
+    }
+    if (c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1) != 0) {
         logSdlError("SDL_GL_SetAttribute", @src());
         return error.SDLGLSetAttributeFailed;
     }
@@ -952,6 +954,86 @@ pub fn main() !void {
     const high_dpi_factor = getHighDpiFactorGL(window);
     _ = high_dpi_factor;
 
+    var vertex_array: gl.GLuint = undefined;
+    gl.genVertexArrays(1, &vertex_array);
+    gl.bindVertexArray(vertex_array);
+
+    const vertex_buffer_data = [_]f32{
+        -1, -1, 0,
+        1, -1, 0,
+        0, 1, 0
+    };
+    var vertex_buffer: gl.GLuint = undefined;
+    gl.genBuffers(1, &vertex_buffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_buffer_data.len, &vertex_buffer_data[0], gl.STATIC_DRAW);
+
+    const shader_program: gl.GLuint = shader: {
+        const vertex_shader = gl.createShader(gl.VERTEX_SHADER);
+        const fragment_shader = gl.createShader(gl.FRAGMENT_SHADER);
+
+        const vertex_shader_code = @embedFile("shader.vert");
+        const fragment_shader_code = @embedFile("shader.frag");
+
+        var result: gl.GLint = gl.FALSE;
+        var info_log_length: gl.GLint = 0;
+
+        gl.shaderSource(vertex_shader, 1, &[_][*c]const u8{ vertex_shader_code }, null);
+        gl.compileShader(vertex_shader);
+
+        gl.getShaderiv(vertex_shader, gl.COMPILE_STATUS, &result);
+        gl.getShaderiv(vertex_shader, gl.INFO_LOG_LENGTH, &info_log_length);
+        if (info_log_length > 0) {
+            var info_log = try arena.alloc(u8, @intCast(usize, info_log_length));
+            defer arena.free(info_log);
+            gl.getShaderInfoLog(vertex_shader, info_log_length, null, info_log.ptr);
+            std.debug.print("{s}\n", .{ info_log });
+        }
+        if (result == gl.FALSE) {
+            return error.VertexShaderCompilationFailed;
+        }
+
+        gl.shaderSource(fragment_shader, 1, &[_][*c]const u8{ fragment_shader_code }, null);
+        gl.compileShader(fragment_shader);
+
+        gl.getShaderiv(fragment_shader, gl.COMPILE_STATUS, &result);
+        gl.getShaderiv(fragment_shader, gl.INFO_LOG_LENGTH, &info_log_length);
+        if (info_log_length > 0) {
+            var info_log = try arena.alloc(u8, @intCast(usize, info_log_length));
+            defer arena.free(info_log);
+            gl.getShaderInfoLog(fragment_shader, info_log_length, null, info_log.ptr);
+            std.debug.print("{s}\n", .{ info_log });
+        }
+        if (result == gl.FALSE) {
+            return error.FragmentShaderCompilationFailed;
+        }
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertex_shader);
+        gl.attachShader(program, fragment_shader);
+        gl.linkProgram(program);
+
+        gl.getProgramiv(program, gl.LINK_STATUS, &result);
+        gl.getProgramiv(program, gl.INFO_LOG_LENGTH, &info_log_length);
+        if (info_log_length > 0) {
+            var info_log = try arena.alloc(u8, @intCast(usize, info_log_length));
+            defer arena.free(info_log);
+            gl.getProgramInfoLog(program, info_log_length, null, info_log.ptr);
+            std.debug.print("{s}\n", .{ info_log });
+        }
+        if (result == gl.FALSE) {
+            return error.ShaderLinkingFailed;
+        }
+
+        gl.detachShader(program, vertex_shader);
+        gl.detachShader(program, fragment_shader);
+
+        gl.deleteShader(vertex_shader);
+        gl.deleteShader(fragment_shader);
+
+        break :shader program;
+    };
+
     var quit = false;
     while (!quit) {
         var event: c.SDL_Event = undefined;
@@ -968,7 +1050,15 @@ pub fn main() !void {
         }
 
         gl.clearColor(1, 1, 1, 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        gl.useProgram(shader_program);
+
+        gl.enableVertexAttribArray(0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 0, null);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.disableVertexAttribArray(0);
 
         c.SDL_GL_SwapWindow(window);
 
