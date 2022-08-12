@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const c = @import("c.zig");
 
 const Allocator = std.mem.Allocator;
+const Vector = std.meta.Vector;
 const native_endian = builtin.cpu.arch.endian();
 
 fn bswapAllIntFieldsToHost(comptime S: type, ptr: *S) void {
@@ -348,7 +349,20 @@ fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i16, IS_SHORT: u
 }
 
 const Glyph = struct {
-    const Point = std.meta.Vector(2, f32);
+    const Point = Vector(2, f32);
+
+    fn dot(a: Point, b: Point) f32 {
+        return a[0]*b[0] + a[1]*b[1];
+    }
+    fn dot2(v: Point) f32 {
+        return v[0]*v[0] + v[1]*v[1];
+    }
+    fn cro(a: Point, b: Point) f32 {
+        return a[0]*b[1] - a[1]*b[0];
+    }
+    fn length(v: Point) f32 {
+        return std.math.sqrt(dot2(v));
+    }
 
     const QuadraticBezierCurve = struct {
         p0: Point,
@@ -416,6 +430,44 @@ const Glyph = struct {
             return ret;
         }
 
+        // From https://iquilezles.org/articles/distfunctions2d/
+        fn signedDistanceSegment(curve: QuadraticBezierCurve, p: Point) f32 {
+            const a = curve.p0;
+            const b = curve.p2;
+
+            const pa = p - a;
+            const ba = b - a;
+            const h = std.math.clamp(dot(pa, ba)/dot2(ba), 0, 1.0);
+            return length(pa - ba*@splat(2, h));
+        }
+
+        // From https://www.shadertoy.com/view/MlKcDD
+        // Adapted from http://research.microsoft.com/en-us/um/people/hoppe/ravg.pdf (https://hhoppe.com/ravg.pdf)
+        fn approximateSignedDistance(curve: QuadraticBezierCurve, p: Point) f32 {
+            var p0 = curve.p0;
+            var p1 = curve.p1;
+            var p2 = curve.p2;
+
+            if (@reduce(.And, p0 == p1)) return curve.signedDistanceSegment(p);
+
+            const i = p0 - p2;
+            const j = p2 - p1;
+            const k = p1 - p0;
+            const w = j  - k;
+
+            p0 -= p; p1 -= p; p2 -= p;
+
+            const x = cro(p0, p2);
+            const y = cro(p1, p0);
+            const z = cro(p2, p1);
+
+            const s = @splat(2, @as(f32, 2))*(@splat(2, y)*j + @splat(2, z)*k) - @splat(2, x)*i;
+
+            const r = (y*z - x*x*0.25)/dot2(s);
+            const t = std.math.clamp((0.5*x + y + r*dot(s,w))/(x + y + z), 0.0, 1.0);
+
+            return length(p0 + @splat(2, t)*(k + k + @splat(2, t)*w));
+        }
     };
 
     gpa: Allocator,
@@ -653,17 +705,30 @@ const Glyph = struct {
         glyph.gpa.free(glyph.segments);
     }
 
-    fn inside(glyph: Glyph, x: f32, y: f32) bool {
-        if (x < @intToFloat(f32, glyph.x_min) or y < @intToFloat(f32, glyph.y_min) or
-            x > @intToFloat(f32, glyph.x_max) or y > @intToFloat(f32, glyph.y_max)) {
+    fn inside(glyph: Glyph, p: Point) bool {
+        if (p[0] < @intToFloat(f32, glyph.x_min) or p[1] < @intToFloat(f32, glyph.y_min) or
+            p[0] > @intToFloat(f32, glyph.x_max) or p[1] > @intToFloat(f32, glyph.y_max)) {
             return false;
         }
 
         var winding: i16 = 0;
         for (glyph.segments) |segment| {
-            winding += segment.windingDelta(.{ x, y });
+            winding += segment.windingDelta(p);
         }
         return winding != 0;
+    }
+
+    fn approximateSignedDistance(glyph: Glyph, p: Point) f32 {
+        var distance: f32 = std.math.f32_max;
+        var winding: i16 = 0;
+        for (glyph.segments) |segment| {
+            const d = segment.approximateSignedDistance(p);
+            if (std.math.absFloat(d) < std.math.absFloat(distance)) {
+                distance = d;
+            }
+            winding += segment.windingDelta(p);
+        }
+        return if (winding != 0) -distance else distance;
     }
 };
 
@@ -877,29 +942,21 @@ pub fn main() !void {
         while (y <= glyph.y_max) : (y += 1) {
             var x = glyph.x_min;
             while (x <= glyph.x_max) : (x += 1) {
-                const draw = glyph.inside(@intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5);
-                if (draw and c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
+                const center = Vector(2, f32){ @intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5 };
+                const sd = glyph.approximateSignedDistance(center);
+
+                const color = 255 - @floatToInt(u8, 255*std.math.clamp(0.5 - sd, 0, 1));
+                if (c.SDL_SetRenderDrawColor(renderer, color, color, color, 255) != 0) {
+                    logSdlError("SDL_SetRenderDrawColor", @src());
+                    return error.SetRenderDrawColorFailed;
+                }
+
+                if (c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
                     logSdlError("SDL_RenderDrawPoint", @src());
                     return error.RenderDrawPointFailed;
                 }
             }
         }
-
-        //if (c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255) != 0) {
-            //logSdlError("SDL_SetRenderDrawColor", @src());
-            //return error.SetRenderDrawColorFailed;
-        //}
-
-        //for (glyhp.segments) |segment| {
-            //if (c.SDL_RenderDrawLineF(renderer, x0 + segment.p0[0] + 0.5, y0 - segment.p0[1] + y_max + 0.5, x0 + segment.p2[0] + 0.5, y0 - segment.p2[1] + y_max + 0.5) != 0) {
-                //logSdlError("SDL_RenderDrawLineF", @src());
-                //return error.RenderDrawLineFailed;
-            //}
-            //if (c.SDL_RenderDrawPointF(renderer, x0 + segment.p1[0] + 0.5, y0 - segment.p1[1] + y_max + 0.5) != 0) {
-                //logSdlError("SDL_RenderDrawPointF", @src());
-                //return error.RenderDrawPointFailed;
-            //}
-        //}
 
         c.SDL_RenderPresent(renderer);
     }
