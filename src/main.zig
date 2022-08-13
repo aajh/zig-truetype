@@ -360,7 +360,7 @@ fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i16, IS_SHORT: u
 }
 
 const Glyph = struct {
-    const Point = Vector(2, f32);
+    const Point = Vector(2, i16);
 
     fn dot(a: Point, b: Point) f32 {
         return a[0]*b[0] + a[1]*b[1];
@@ -375,7 +375,7 @@ const Glyph = struct {
         return std.math.sqrt(dot2(v));
     }
 
-    const QuadraticBezierCurve = struct {
+    const QuadraticBezierCurve = packed struct {
         p0: Point,
         p1: Point,
         p2: Point,
@@ -616,8 +616,10 @@ const Glyph = struct {
             while (point_i < contour_end) : (point_i += 1) {
                 const on_curve = flags[point_i] & ON_CURVE > 0;
                 const point = Point{
-                    @intToFloat(f32, x_coordinates[point_i]),
-                    @intToFloat(f32, y_coordinates[point_i])
+                    //@intToFloat(f32, x_coordinates[point_i]),
+                    //@intToFloat(f32, y_coordinates[point_i]),
+                    x_coordinates[point_i],
+                    y_coordinates[point_i],
                 };
 
                 switch (state) {
@@ -649,7 +651,8 @@ const Glyph = struct {
                             segment_i += 1;
                             state = .on_curve;
                         } else {
-                            const end = (last_point + point) / @splat(2, @as(f32, 2));
+                            //const end = (last_point + point) / @splat(2, @as(f32, 2));
+                            const end = @divTrunc(last_point + point, @splat(2, @as(i16, 2)));
                             segments[segment_i] = .{
                                 .p0 = last_on_curve_point,
                                 .p1 = last_point,
@@ -688,7 +691,8 @@ const Glyph = struct {
                                 };
                                 segment_i += 1;
                             } else {
-                                const end = (last_point + first_point) / @splat(2, @as(f32, 2));
+                                //const end = (last_point + first_point) / @splat(2, @as(f32, 2));
+                                const end = @divTrunc(last_point + first_point, @splat(2, @as(i16, 2)));
                                 segments[segment_i] = .{
                                     .p0 = last_on_curve_point,
                                     .p1 = last_point,
@@ -1028,19 +1032,19 @@ pub fn main() !void {
     };
     defer gl.deleteProgram(shader_program);
 
-    const x0 = 100 - @intToFloat(f32, glyph.x_min);
-    const y0 = 100 - @intToFloat(f32, glyph.y_min);
-    const x_max =    @intToFloat(f32, glyph.x_max);
-    const y_max =    @intToFloat(f32, glyph.y_max);
+    const x0 = 100;
+    const y0 = 100;
+    const w = @intToFloat(f32, glyph.x_max - glyph.x_min);
+    const h = @intToFloat(f32, glyph.y_max - glyph.y_min);
 
     const vertex_position_data = [_]f32{
         x0, y0,
-        x0 + x_max, y0,
-        x0, y0 + y_max,
+        x0 + w, y0,
+        x0, y0 + h,
 
-        x0, y0 + y_max,
-        x0 + x_max, y0,
-        x0 + x_max, y0 + y_max,
+        x0, y0 + h,
+        x0 + w, y0,
+        x0 + w, y0 + h,
     };
     const vertex_position_buffer = buffer: {
         var vertex_buffer: gl.GLuint = undefined;
@@ -1069,7 +1073,23 @@ pub fn main() !void {
     };
     defer gl.deleteBuffers(1, &vertex_glyph_coordinate_buffer);
 
+    const curves_buffer = buffer: {
+        var texture_buffer: gl.GLuint = undefined;
+        gl.genBuffers(1, &texture_buffer);
+        gl.bindBuffer(gl.TEXTURE_BUFFER, texture_buffer);
+        gl.bufferData(gl.TEXTURE_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(Glyph.QuadraticBezierCurve)*glyph.segments.len), glyph.segments.ptr, gl.STATIC_DRAW);
+        break :buffer texture_buffer;
+    };
+    defer gl.deleteBuffers(1, &curves_buffer);
+
+    var curves_texture: gl.GLuint = undefined;
+    gl.genTextures(1, &curves_texture);
+    defer gl.deleteTextures(1, &curves_texture);
+
     const screen_size_location = gl.getUniformLocation(shader_program, "screen_size");
+    const curves_location = gl.getUniformLocation(shader_program, "curves");
+    const glyph_start_location = gl.getUniformLocation(shader_program, "glyph_start");
+    const glyph_len_location = gl.getUniformLocation(shader_program, "glyph_len");
 
     var quit = false;
     while (!quit) {
@@ -1095,6 +1115,14 @@ pub fn main() !void {
         var drawable_height: i32 = undefined;
         c.SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
         gl.uniform2ui(screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_BUFFER, curves_texture);
+        gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, curves_buffer);
+        gl.uniform1i(curves_location, 0);
+
+        gl.uniform1i(glyph_start_location, 0);
+        gl.uniform1i(glyph_len_location, @intCast(gl.GLint, glyph.segments.len));
 
         gl.enableVertexAttribArray(0);
         gl.bindBuffer(gl.ARRAY_BUFFER, vertex_position_buffer);
