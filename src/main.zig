@@ -922,6 +922,8 @@ pub fn main() !void {
     };
     defer c.SDL_DestroyWindow(window);
 
+    c.SDL_SetWindowMinimumSize(window, 100, 100);
+
     const gl_context = c.SDL_GL_CreateContext(window) orelse {
         logSdlError("SDL_GL_CreateContext", @src());
         return error.SDLGLCreateContextFailed;
@@ -956,17 +958,8 @@ pub fn main() !void {
 
     var vertex_array: gl.GLuint = undefined;
     gl.genVertexArrays(1, &vertex_array);
+    defer gl.deleteVertexArrays(1, &vertex_array);
     gl.bindVertexArray(vertex_array);
-
-    const vertex_buffer_data = [_]f32{
-        -1, -1, 0,
-        1, -1, 0,
-        0, 1, 0
-    };
-    var vertex_buffer: gl.GLuint = undefined;
-    gl.genBuffers(1, &vertex_buffer);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_buffer_data.len, &vertex_buffer_data[0], gl.STATIC_DRAW);
 
     const shader_program: gl.GLuint = shader: {
         const vertex_shader = gl.createShader(gl.VERTEX_SHADER);
@@ -1033,6 +1026,50 @@ pub fn main() !void {
 
         break :shader program;
     };
+    defer gl.deleteProgram(shader_program);
+
+    const x0 = 100 - @intToFloat(f32, glyph.x_min);
+    const y0 = 100 - @intToFloat(f32, glyph.y_min);
+    const x_max =    @intToFloat(f32, glyph.x_max);
+    const y_max =    @intToFloat(f32, glyph.y_max);
+
+    const vertex_position_data = [_]f32{
+        x0, y0,
+        x0 + x_max, y0,
+        x0, y0 + y_max,
+
+        x0, y0 + y_max,
+        x0 + x_max, y0,
+        x0 + x_max, y0 + y_max,
+    };
+    const vertex_position_buffer = buffer: {
+        var vertex_buffer: gl.GLuint = undefined;
+        gl.genBuffers(1, &vertex_buffer);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_position_data.len, &vertex_position_data[0], gl.STATIC_DRAW);
+        break :buffer vertex_buffer;
+    };
+    defer gl.deleteBuffers(1, &vertex_position_buffer);
+
+    const vertex_glyph_coordinate_data = [_]f32 {
+        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_min),
+        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_min),
+        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_max),
+
+        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_max),
+        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_min),
+        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_max),
+    };
+    const vertex_glyph_coordinate_buffer = buffer: {
+        var vertex_buffer: gl.GLuint = undefined;
+        gl.genBuffers(1, &vertex_buffer);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_glyph_coordinate_data.len, &vertex_glyph_coordinate_data[0], gl.STATIC_DRAW);
+        break :buffer vertex_buffer;
+    };
+    defer gl.deleteBuffers(1, &vertex_glyph_coordinate_buffer);
+
+    const screen_size_location = gl.getUniformLocation(shader_program, "screen_size");
 
     var quit = false;
     while (!quit) {
@@ -1054,11 +1091,23 @@ pub fn main() !void {
 
         gl.useProgram(shader_program);
 
+        var drawable_width: i32 = undefined;
+        var drawable_height: i32 = undefined;
+        c.SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
+        gl.uniform2ui(screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
+
         gl.enableVertexAttribArray(0);
-        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 0, null);
-        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_position_buffer);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 0, null);
+
+        gl.enableVertexAttribArray(1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_glyph_coordinate_buffer);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 0, null);
+
+        gl.drawArrays(gl.TRIANGLES, 0, vertex_position_data.len / 2);
+
         gl.disableVertexAttribArray(0);
+        gl.disableVertexAttribArray(1);
 
         c.SDL_GL_SwapWindow(window);
 
