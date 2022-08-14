@@ -1031,11 +1031,12 @@ pub fn main() !void {
         break :shader program;
     };
     defer gl.deleteProgram(shader_program);
+    gl.useProgram(shader_program);
 
     const x0 = 100;
     const y0 = 100;
-    const w = @intToFloat(f32, glyph.x_max - glyph.x_min);
-    const h = @intToFloat(f32, glyph.y_max - glyph.y_min);
+    const w = @intToFloat(f32, glyph.x_max - glyph.x_min) / 10;
+    const h = @intToFloat(f32, glyph.y_max - glyph.y_min) / 10;
 
     const vertex_position_data = [_]f32{
         x0, y0,
@@ -1090,6 +1091,16 @@ pub fn main() !void {
     const curves_location = gl.getUniformLocation(shader_program, "curves");
     const glyph_start_location = gl.getUniformLocation(shader_program, "glyph_start");
     const glyph_len_location = gl.getUniformLocation(shader_program, "glyph_len");
+    const pixels_in_funit_location = gl.getUniformLocation(shader_program, "pixels_in_funit");
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_BUFFER, curves_texture);
+    gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, curves_buffer);
+    gl.uniform1i(curves_location, 0);
+
+    gl.uniform1i(glyph_start_location, 0);
+    gl.uniform1i(glyph_len_location, @intCast(gl.GLint, glyph.segments.len));
+    gl.uniform1f(pixels_in_funit_location, w / (@intToFloat(f32, glyph.x_max) - @intToFloat(f32, glyph.x_min)));
 
     var quit = false;
     while (!quit) {
@@ -1115,14 +1126,6 @@ pub fn main() !void {
         var drawable_height: i32 = undefined;
         c.SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
         gl.uniform2ui(screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
-
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_BUFFER, curves_texture);
-        gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, curves_buffer);
-        gl.uniform1i(curves_location, 0);
-
-        gl.uniform1i(glyph_start_location, 0);
-        gl.uniform1i(glyph_len_location, @intCast(gl.GLint, glyph.segments.len));
 
         gl.enableVertexAttribArray(0);
         gl.bindBuffer(gl.ARRAY_BUFFER, vertex_position_buffer);

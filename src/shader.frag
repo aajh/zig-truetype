@@ -3,6 +3,7 @@
 uniform isamplerBuffer curves;
 uniform int glyph_start;
 uniform int glyph_len;
+uniform float pixels_in_funit;
 
 layout(location = 0) in vec2 glyph_coordinate;
 
@@ -103,10 +104,7 @@ float sdGlyph(vec2 p) {
 
 void main() {
     float signed_distance = sdGlyph(glyph_coordinate);
-    float c = 1.0 - clamp(0.5 - signed_distance, 0, 1);
+    float c = 1.0 - clamp(0.5 - signed_distance*pixels_in_funit, 0, 1);
     color = vec3(c, c, c);
-
-    //color = vec3(gl_FragCoord.x / 1600, gl_FragCoord.y / 1200, 0.0);
-    //color = vec3((glyph_coordinate.x - 94.0)/(568.0 - 94.0), glyph_coordinate.y/708.0, 0.0);
 }
 
