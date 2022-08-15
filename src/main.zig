@@ -1011,10 +1011,10 @@ pub fn main() !void {
     defer gl.deleteProgram(shader_program);
     gl.useProgram(shader_program);
 
-    const x0 = 100;
-    const y0 = 100;
-    const w = @intToFloat(f32, glyph.x_max - glyph.x_min) / 10;
-    const h = @intToFloat(f32, glyph.y_max - glyph.y_min) / 10;
+    const x0 = 99;
+    const y0 = 99;
+    const w = @intToFloat(f32, glyph.x_max - glyph.x_min) / 10 + 2;
+    const h = @intToFloat(f32, glyph.y_max - glyph.y_min) / 10 + 2;
 
     const vertex_position_data = [_]f32{
         x0, y0,
@@ -1034,14 +1034,16 @@ pub fn main() !void {
     };
     defer gl.deleteBuffers(1, &vertex_position_buffer);
 
+    // funits_in_pixel
+    const fip  = @intToFloat(f32, glyph.x_max - glyph.x_min) / (w - 2);
     const vertex_glyph_coordinate_data = [_]f32 {
-        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_min),
-        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_min),
-        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_max),
+        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_min) - fip,
+        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
+        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
 
-        @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_max),
-        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_min),
-        @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_max),
+        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
+        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
+        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_max) + fip,
     };
     const vertex_glyph_coordinate_buffer = buffer: {
         var vertex_buffer: gl.GLuint = undefined;
@@ -1078,7 +1080,7 @@ pub fn main() !void {
 
     gl.uniform1i(glyph_start_location, 0);
     gl.uniform1i(glyph_len_location, @intCast(gl.GLint, glyph.segments.len));
-    gl.uniform1f(pixels_in_funit_location, w / (@intToFloat(f32, glyph.x_max) - @intToFloat(f32, glyph.x_min)));
+    gl.uniform1f(pixels_in_funit_location, (w - 2) / @intToFloat(f32, glyph.x_max - glyph.x_min));
 
     var quit = false;
     while (!quit) {
