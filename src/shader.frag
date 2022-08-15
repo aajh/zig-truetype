@@ -21,7 +21,7 @@ float sdSegment(in vec2 p, in vec2 a, in vec2 b) {
 
 // From https://www.shadertoy.com/view/MlKcDD
 // Adapted from http://research.microsoft.com/en-us/um/people/hoppe/ravg.pdf (https://hhoppe.com/ravg.pdf)
-float sdBezier(vec2 p, vec2 v0, vec2 v1, vec2 v2) {
+float approximateSdBezier(vec2 p, vec2 v0, vec2 v1, vec2 v2) {
     if (v0 == v1) return sdSegment(p, v0, v2);
 
     vec2 i = v0 - v2;
@@ -41,6 +41,44 @@ float sdBezier(vec2 p, vec2 v0, vec2 v1, vec2 v2) {
     float t = clamp( (0.5*x+y+r*dot(s,w))/(x+y+z),0.0,1.0);
 
     return length( v0+t*(k+k+t*w) );
+}
+
+// From https://iquilezles.org/articles/distfunctions2d/
+float sdBezier(in vec2 pos, in vec2 A, in vec2 B, in vec2 C) {
+    vec2 a = B - A;
+    vec2 b = A - 2.0*B + C;
+    vec2 c = a * 2.0;
+    vec2 d = A - pos;
+    float kk = 1.0/dot(b,b);
+    float kx = kk * dot(a,b);
+    float ky = kk * (2.0*dot(a,a)+dot(d,b)) / 3.0;
+    float kz = kk * dot(d,a);
+    float res = 0.0;
+    float p = ky - kx*kx;
+    float p3 = p*p*p;
+    float q = kx*(2.0*kx*kx-3.0*ky) + kz;
+    float h = q*q + 4.0*p3;
+    if( h >= 0.0)
+    {
+        h = sqrt(h);
+        vec2 x = (vec2(h,-h)-q)/2.0;
+        vec2 uv = sign(x)*pow(abs(x), vec2(1.0/3.0));
+        float t = clamp( uv.x+uv.y-kx, 0.0, 1.0 );
+        res = dot2(d + (c + b*t)*t);
+    }
+    else
+    {
+        float z = sqrt(-p);
+        float v = acos( q/(p*z*2.0) ) / 3.0;
+        float m = cos(v);
+        float n = sin(v)*1.732050808;
+        vec3  t = clamp(vec3(m+m,-n-m,n-m)*z-kx,0.0,1.0);
+        res = min( dot2(d+(c+b*t.x)*t.x),
+                   dot2(d+(c+b*t.y)*t.y) );
+        // the third root cannot be the closest
+        // res = min(res,dot2(d+(c+b*t.z)*t.z));
+    }
+    return sqrt( res );
 }
 
 float sample_y(float t, vec2 p0, vec2 p1, vec2 p2) {
@@ -93,7 +131,7 @@ float sdGlyph(vec2 p) {
         vec2 p0 = getCurvePoint(i, 0);
         vec2 p1 = getCurvePoint(i, 1);
         vec2 p2 = getCurvePoint(i, 2);
-        float d = sdBezier(p, p0, p1, p2);
+        float d = approximateSdBezier(p, p0, p1, p2);
         if (abs(d) < abs(distance)) {
             distance = d;
         }
@@ -105,6 +143,6 @@ float sdGlyph(vec2 p) {
 void main() {
     float signed_distance = sdGlyph(glyph_coordinate);
     float c = 1.0 - clamp(0.5 - signed_distance*pixels_in_funit, 0, 1);
-    color = vec3(c, c, c);
+    color = vec3(pow(c, 1/2.2));
 }
 
