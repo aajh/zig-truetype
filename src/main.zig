@@ -21,19 +21,6 @@ fn logSdlError(message: []const u8, src: std.builtin.SourceLocation) void {
     std.debug.print("{s} error {s}:{}: {s}\n", .{ message, src.file, src.line, c.SDL_GetError() });
 }
 
-fn getHighDpiFactor(window: *c.SDL_Window, renderer: *c.SDL_Renderer) !f32 {
-    var window_width: i32 = undefined;
-    c.SDL_GetWindowSize(window, &window_width, null);
-
-    var drawable_width: i32 = undefined;
-    if (c.SDL_GetRendererOutputSize(renderer, &drawable_width, null) != 0) {
-        logSdlError("SDL_GetRendererOutputSize", @src());
-        return error.GetRenderOutputSizeFailed;
-    }
-
-    return @intToFloat(f32, drawable_width) / @intToFloat(f32, window_width);
-}
-
 fn getHighDpiFactorGL(window: *c.SDL_Window) f32 {
     var window_width: i32 = undefined;
     c.SDL_GetWindowSize(window, &window_width, null);
@@ -948,15 +935,6 @@ pub fn main() !void {
 
     try gl.load(window, glGetProcAddress);
 
-    //const renderer = c.SDL_CreateRenderer(window, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_TARGETTEXTURE) orelse {
-        //logSdlError("SDL_CreateRenderer", @src());
-        //return error.SDLCreateRendererFailed;
-    //};
-    //defer c.SDL_DestroyRenderer(renderer);
-
-    //const high_dpi_factor = try getHighDpiFactor(window, renderer);
-    //_ = high_dpi_factor;
-
     const high_dpi_factor = getHighDpiFactorGL(window);
     _ = high_dpi_factor;
 
@@ -1141,48 +1119,6 @@ pub fn main() !void {
         gl.disableVertexAttribArray(1);
 
         c.SDL_GL_SwapWindow(window);
-
-        //if (c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255) != 0) {
-            //logSdlError("SDL_SetRenderDrawColor", @src());
-            //return error.SetRenderDrawColorFailed;
-        //}
-
-        //if (c.SDL_RenderClear(renderer) != 0) {
-            //logSdlError("SDL_RenderClear", @src());
-            //return error.RenderClearFailed;
-        //}
-
-        //const x0 = 100 - @intToFloat(f32, glyph.x_min);
-        //const y0 = 100 - @intToFloat(f32, glyph.y_min);
-        ////const x_max =    @intToFloat(f32, glyph.x_max);
-        ////const y_max =    @intToFloat(f32, glyph.y_max);
-
-        //if (c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255) != 0) {
-            //logSdlError("SDL_SetRenderDrawColor", @src());
-            //return error.SetRenderDrawColorFailed;
-        //}
-
-        //var y = glyph.y_min;
-        //while (y <= glyph.y_max) : (y += 1) {
-            //var x = glyph.x_min;
-            //while (x <= glyph.x_max) : (x += 1) {
-                //const center = Vector(2, f32){ @intToFloat(f32, x) + 0.5, @intToFloat(f32, y) + 0.5 };
-                //const sd = glyph.approximateSignedDistance(center);
-
-                //const color = 255 - @floatToInt(u8, 255*std.math.clamp(0.5 - sd, 0, 1));
-                //if (c.SDL_SetRenderDrawColor(renderer, color, color, color, 255) != 0) {
-                    //logSdlError("SDL_SetRenderDrawColor", @src());
-                    //return error.SetRenderDrawColorFailed;
-                //}
-
-                //if (c.SDL_RenderDrawPoint(renderer, @floatToInt(i16, x0) + x, @floatToInt(i16, y0) + glyph.y_max - y) != 0) {
-                    //logSdlError("SDL_RenderDrawPoint", @src());
-                    //return error.RenderDrawPointFailed;
-                //}
-            //}
-        //}
-
-        //c.SDL_RenderPresent(renderer);
     }
 }
 
