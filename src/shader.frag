@@ -7,7 +7,7 @@ uniform float pixels_in_funit;
 
 layout(location = 0) in vec2 glyph_coordinate;
 
-out vec3 color;
+out vec4 color;
 
 float dot2(in vec2 v) { return dot(v,v); }
 float cro(in vec2 a, in vec2 b) { return a.x*b.y - a.y*b.x; }
@@ -142,7 +142,7 @@ float sdGlyph(vec2 p) {
 
 void main() {
     float signed_distance = sdGlyph(glyph_coordinate);
-    float c = 1.0 - clamp(0.5 - signed_distance*pixels_in_funit, 0, 1);
-    color = vec3(pow(c, 1/2.2));
+    float alpha = clamp(0.5 - signed_distance*pixels_in_funit, 0, 1);
+    color = vec4(0, 0, 0, pow(alpha, 1/2.2));
 }
 
