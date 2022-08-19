@@ -3,7 +3,7 @@
 uniform isamplerBuffer curves;
 
 layout(location = 0) in vec2 glyph_coordinate;
-layout(location = 1) in float pixels_in_funit;
+layout(location = 1) in float pixels_per_funit;
 layout(location = 2) flat in int glyph_start;
 layout(location = 3) flat in int glyph_end;
 
@@ -140,9 +140,12 @@ float sdGlyph(vec2 p) {
     return winding != 0 ? -distance : distance;
 }
 
+const bool USE_FONT_SMOOTHING = true;
+
 void main() {
     float signed_distance = sdGlyph(glyph_coordinate);
-    float alpha = clamp(0.5 - signed_distance*pixels_in_funit, 0, 1);
-    color = vec4(0, 0, 0, pow(alpha, 1/2.2));
+    // Additional 0.2 is to simulate Apple-style font smoothing.
+    float alpha = clamp((USE_FONT_SMOOTHING ? 0.7 : 0.5) - signed_distance*pixels_per_funit, 0, 1);
+    color = vec4(0, 0, 0, alpha);
 }
 
