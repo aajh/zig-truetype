@@ -1211,6 +1211,12 @@ pub fn main() !void {
     var gc = try GraphicsContext.init(arena, window);
     defer gc.deinit();
 
+    // Disable vsync for better idea of the performance
+    if (c.SDL_GL_SetSwapInterval(0) != 0) {
+        logSdlError("SDL_GL_SetSwapInterval", @src());
+        return error.SDLGLSetSwapInterval;
+    }
+
     gl.bindBuffer(gl.TEXTURE_BUFFER, gc.curves_buffer);
     gl.bufferData(gl.TEXTURE_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(Glyph.QuadraticBezierCurve)*glyph.segments.len), glyph.segments.ptr, gl.STATIC_DRAW);
 
@@ -1228,9 +1234,18 @@ pub fn main() !void {
         .end   = @intCast(i32, 0 + glyph.segments.len),
     };
 
+    var frame_timer = try std.time.Timer.start();
+    var frames: u32 = 0;
     var dx: f32 = 0.0;
     var quit = false;
-    while (!quit) : (dx += 0.1) {
+    while (!quit) : ({ dx += 0.1; frames += 1; }) {
+        const current_timer_time = frame_timer.read();
+        if (current_timer_time >= std.time.ns_per_s) {
+            std.debug.print("Frame time is {d:.2}ms or {d}fps\n", .{ @intToFloat(f64, std.time.ms_per_s) / @intToFloat(f64, frames), frames });
+            frame_timer.reset();
+            frames = 0;
+        }
+
         var event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&event) != 0) {
             switch (event.type) {
