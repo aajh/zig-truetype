@@ -366,106 +366,6 @@ const Glyph = struct {
         p0: Point,
         p1: Point,
         p2: Point,
-
-        fn sampleY(b: QuadraticBezierCurve, t: f32) f32 {
-            return t*t * (b.p0[1] - 2*b.p1[1] + b.p2[1]) + t * (2*b.p1[1] - 2*b.p0[1]) + b.p0[1];
-        }
-
-        fn windingDeltaLine(b: QuadraticBezierCurve, p: Point) i16 {
-            const denominator = b.p2[1] - b.p0[1];
-            if (std.math.absFloat(denominator) < std.math.epsilon(@TypeOf(denominator))) return 0;
-
-            const nominator = p[1] - b.p0[1];
-            const u = nominator / denominator;
-            if (u < 0 or u > 1) return 0;
-
-            const t = b.p0[0] - p[0] + u*(b.p2[0] - b.p0[0]);
-            if (t < 0) return 0;
-
-            return if (b.p0[1] < b.p2[1]) 1 else -1;
-        }
-
-        // Adapted from https://git.outerproduct.net/dconf2021-ff.git/
-        fn windingDelta(curve: QuadraticBezierCurve, loc: Point) i16 {
-            const p0 = curve.p0;
-            const p1 = curve.p1;
-            const p2 = curve.p2;
-
-            const a = p0[0] - 2*p1[0] + p2[0];
-            const b = 2*p1[0] - 2*p0[0];
-            const c_ = p0[0] - loc[0];
-            const det = b*b - 4*a*c_;
-            var res = Point{
-                (-b - std.math.sqrt(det)) / (2 * a),
-                (-b + std.math.sqrt(det)) / (2 * a),
-            };
-
-            var valid_x = det >= 0;
-            var valid_y = det >= 0;
-            if (std.math.absFloat(a) < 1e-3) {
-                res[0] = -c_ / b;
-                res[1] = res[0];
-                valid_x = true;
-                valid_y = true;
-            }
-
-            valid_x = valid_x and (curve.sampleY(res[0]) < loc[1]);
-            valid_y = valid_y and (curve.sampleY(res[1]) < loc[1]);
-
-            var ret: i16 = 0;
-            var shift: u5 = 0;
-            if (p0[0] > loc[0]) shift += 2;
-            if (p1[0] > loc[0]) shift += 4;
-            if (p2[0] > loc[0]) shift += 8;
-            const klass = @as(i32, 0x2E74) >> shift;
-            if ((klass & 1) != 0 and valid_x) {
-                ret += 1;
-            }
-            if ((klass & 2) != 0 and valid_y) {
-                ret -= 1;
-            }
-
-            return ret;
-        }
-
-        // From https://iquilezles.org/articles/distfunctions2d/
-        fn signedDistanceSegment(curve: QuadraticBezierCurve, p: Point) f32 {
-            const a = curve.p0;
-            const b = curve.p2;
-
-            const pa = p - a;
-            const ba = b - a;
-            const h = std.math.clamp(dot(pa, ba)/dot2(ba), 0, 1.0);
-            return length(pa - ba*@splat(2, h));
-        }
-
-        // From https://www.shadertoy.com/view/MlKcDD
-        // Adapted from http://research.microsoft.com/en-us/um/people/hoppe/ravg.pdf (https://hhoppe.com/ravg.pdf)
-        fn approximateSignedDistance(curve: QuadraticBezierCurve, p: Point) f32 {
-            var p0 = curve.p0;
-            var p1 = curve.p1;
-            var p2 = curve.p2;
-
-            if (@reduce(.And, p0 == p1)) return curve.signedDistanceSegment(p);
-
-            const i = p0 - p2;
-            const j = p2 - p1;
-            const k = p1 - p0;
-            const w = j  - k;
-
-            p0 -= p; p1 -= p; p2 -= p;
-
-            const x = cro(p0, p2);
-            const y = cro(p1, p0);
-            const z = cro(p2, p1);
-
-            const s = @splat(2, @as(f32, 2))*(@splat(2, y)*j + @splat(2, z)*k) - @splat(2, x)*i;
-
-            const r = (y*z - x*x*0.25)/dot2(s);
-            const t = std.math.clamp((0.5*x + y + r*dot(s,w))/(x + y + z), 0.0, 1.0);
-
-            return length(p0 + @splat(2, t)*(k + k + @splat(2, t)*w));
-        }
     };
 
     gpa: Allocator,
@@ -703,32 +603,6 @@ const Glyph = struct {
 
     fn deinit(glyph: Glyph) void {
         glyph.gpa.free(glyph.segments);
-    }
-
-    fn inside(glyph: Glyph, p: Point) bool {
-        if (p[0] < @intToFloat(f32, glyph.x_min) or p[1] < @intToFloat(f32, glyph.y_min) or
-            p[0] > @intToFloat(f32, glyph.x_max) or p[1] > @intToFloat(f32, glyph.y_max)) {
-            return false;
-        }
-
-        var winding: i16 = 0;
-        for (glyph.segments) |segment| {
-            winding += segment.windingDelta(p);
-        }
-        return winding != 0;
-    }
-
-    fn approximateSignedDistance(glyph: Glyph, p: Point) f32 {
-        var distance: f32 = std.math.f32_max;
-        var winding: i16 = 0;
-        for (glyph.segments) |segment| {
-            const d = segment.approximateSignedDistance(p);
-            if (std.math.absFloat(d) < std.math.absFloat(distance)) {
-                distance = d;
-            }
-            winding += segment.windingDelta(p);
-        }
-        return if (winding != 0) -distance else distance;
     }
 };
 
