@@ -733,6 +733,7 @@ const Glyph = struct {
 };
 
 const GraphicsContext = struct {
+    window    : *c.SDL_Window,
     gl_context: c.SDL_GLContext = null,
 
     vertex_array: gl.GLuint = 0,
@@ -744,8 +745,21 @@ const GraphicsContext = struct {
 
     curves_texture: gl.GLuint = 0,
 
+    screen_size_location    : gl.GLint = 0,
+    curves_location         : gl.GLint = 0,
+    glyph_start_location    : gl.GLint = 0,
+    glyph_len_location      : gl.GLint = 0,
+    pixels_in_funit_location: gl.GLint = 0,
+
+    vertex_positions        : std.ArrayList(f32),
+    vertex_glyph_coordinates: std.ArrayList(f32),
+
     fn init(gpa: Allocator, window: *c.SDL_Window) !GraphicsContext {
-        var gc: GraphicsContext = .{};
+        var gc: GraphicsContext = .{
+            .window = window,
+            .vertex_positions         = std.ArrayList(f32).init(gpa),
+            .vertex_glyph_coordinates = std.ArrayList(f32).init(gpa),
+        };
 
         gc.gl_context = c.SDL_GL_CreateContext(window) orelse {
             logSdlError("SDL_GL_CreateContext", @src());
@@ -857,10 +871,16 @@ const GraphicsContext = struct {
         gl.genTextures(1, &gc.curves_texture);
         errdefer gl.deleteTextures(1, &gc.curves_texture);
 
+        gc.screen_size_location = gl.getUniformLocation(gc.shader, "screen_size");
+        gc.curves_location = gl.getUniformLocation(gc.shader, "curves");
+        gc.glyph_start_location = gl.getUniformLocation(gc.shader, "glyph_start");
+        gc.glyph_len_location = gl.getUniformLocation(gc.shader, "glyph_len");
+        gc.pixels_in_funit_location = gl.getUniformLocation(gc.shader, "pixels_in_funit");
+
         return gc;
     }
 
-    fn deinit(gc: GraphicsContext) void {
+    fn deinit(gc: *GraphicsContext) void {
         gl.deleteTextures(1, &gc.curves_texture);
         var buffers = [_]gl.GLuint {
             gc.vertex_position_buffer,
@@ -871,6 +891,77 @@ const GraphicsContext = struct {
         gl.deleteProgram(gc.shader);
         gl.deleteVertexArrays(1, &gc.vertex_array);
         c.SDL_GL_DeleteContext(gc.gl_context);
+        gc.vertex_glyph_coordinates.deinit();
+        gc.vertex_positions.deinit();
+    }
+
+    fn renderGlyph(gc: *GraphicsContext, glyph: Glyph, x0: f32, y0: f32, scale: f32) !void {
+        const x = x0 - 1;
+        const y = y0 - 1;
+        const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*scale + 2;
+        const h = @intToFloat(f32, glyph.y_max - glyph.y_min)*scale + 2;
+
+        const vertex_position_data = [_]f32{
+            x, y,
+            x + w, y,
+            x, y + h,
+
+            x, y + h,
+            x + w, y,
+            x + w, y + h,
+        };
+        try gc.vertex_positions.appendSlice(&vertex_position_data);
+
+        // funits_in_pixel
+        const fip  = @intToFloat(f32, glyph.x_max - glyph.x_min) / (w - 2);
+        const vertex_glyph_coordinate_data = [_]f32 {
+            @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_min) - fip,
+            @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
+            @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
+
+            @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
+            @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
+            @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_max) + fip,
+        };
+        try gc.vertex_glyph_coordinates.appendSlice(&vertex_glyph_coordinate_data);
+    }
+
+    fn render(gc: *GraphicsContext, glyph_start: gl.GLint, glyph_len: gl.GLint, pixels_in_funit: f32) void {
+        gl.useProgram(gc.shader);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_position_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(f32)*gc.vertex_positions.items.len), gc.vertex_positions.items.ptr, gl.DYNAMIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_coordinate_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(f32)*gc.vertex_glyph_coordinates.items.len), gc.vertex_glyph_coordinates.items.ptr, gl.DYNAMIC_DRAW);
+
+        var drawable_width: i32 = undefined;
+        var drawable_height: i32 = undefined;
+        c.SDL_GL_GetDrawableSize(gc.window, &drawable_width, &drawable_height);
+        gl.uniform2ui(gc.screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
+
+        gl.uniform1i(gc.curves_location, 0);
+        gl.uniform1i(gc.glyph_start_location, glyph_start);
+        gl.uniform1i(gc.glyph_len_location, glyph_len);
+        gl.uniform1f(gc.pixels_in_funit_location, pixels_in_funit);
+
+        gl.activeTexture(gl.TEXTURE0);
+
+        gl.enableVertexAttribArray(0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_position_buffer);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 0, null);
+
+        gl.enableVertexAttribArray(1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_coordinate_buffer);
+        gl.vertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 0, null);
+
+        gl.drawArrays(gl.TRIANGLES, 0, @intCast(gl.GLsizei, gc.vertex_positions.items.len / 2));
+
+        gl.disableVertexAttribArray(0);
+        gl.disableVertexAttribArray(1);
+
+        gc.vertex_positions.clearRetainingCapacity();
+        gc.vertex_glyph_coordinates.clearRetainingCapacity();
     }
 };
 
@@ -1061,55 +1152,12 @@ pub fn main() !void {
     var gc = try GraphicsContext.init(arena, window);
     defer gc.deinit();
 
-    const x0 = 99;
-    const y0 = 99;
-    const w = @intToFloat(f32, glyph.x_max - glyph.x_min) / 10 + 2;
-    const h = @intToFloat(f32, glyph.y_max - glyph.y_min) / 10 + 2;
-
-    const vertex_position_data = [_]f32{
-        x0, y0,
-        x0 + w, y0,
-        x0, y0 + h,
-
-        x0, y0 + h,
-        x0 + w, y0,
-        x0 + w, y0 + h,
-    };
-    gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_position_buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_position_data.len, &vertex_position_data[0], gl.STATIC_DRAW);
-
-    // funits_in_pixel
-    const fip  = @intToFloat(f32, glyph.x_max - glyph.x_min) / (w - 2);
-    const vertex_glyph_coordinate_data = [_]f32 {
-        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_min) - fip,
-        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
-        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
-
-        @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
-        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
-        @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_max) + fip,
-    };
-    gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_coordinate_buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, @sizeOf(f32)*vertex_glyph_coordinate_data.len, &vertex_glyph_coordinate_data[0], gl.STATIC_DRAW);
-
     gl.bindBuffer(gl.TEXTURE_BUFFER, gc.curves_buffer);
     gl.bufferData(gl.TEXTURE_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(Glyph.QuadraticBezierCurve)*glyph.segments.len), glyph.segments.ptr, gl.STATIC_DRAW);
-
-    const screen_size_location = gl.getUniformLocation(gc.shader, "screen_size");
-    const dx_location = gl.getUniformLocation(gc.shader, "dx");
-    const curves_location = gl.getUniformLocation(gc.shader, "curves");
-    const glyph_start_location = gl.getUniformLocation(gc.shader, "glyph_start");
-    const glyph_len_location = gl.getUniformLocation(gc.shader, "glyph_len");
-    const pixels_in_funit_location = gl.getUniformLocation(gc.shader, "pixels_in_funit");
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_BUFFER, gc.curves_texture);
     gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, gc.curves_buffer);
-    gl.uniform1i(curves_location, 0);
-
-    gl.uniform1i(glyph_start_location, 0);
-    gl.uniform1i(glyph_len_location, @intCast(gl.GLint, glyph.segments.len));
-    gl.uniform1f(pixels_in_funit_location, (w - 2) / @intToFloat(f32, glyph.x_max - glyph.x_min));
 
     var dx: f32 = 0.0;
     var quit = false;
@@ -1130,27 +1178,10 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        gl.useProgram(gc.shader);
-
-        var drawable_width: i32 = undefined;
-        var drawable_height: i32 = undefined;
-        c.SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
-        gl.uniform2ui(screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
-
-        gl.uniform1f(dx_location, dx);
-
-        gl.enableVertexAttribArray(0);
-        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_position_buffer);
-        gl.vertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 0, null);
-
-        gl.enableVertexAttribArray(1);
-        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_coordinate_buffer);
-        gl.vertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 0, null);
-
-        gl.drawArrays(gl.TRIANGLES, 0, vertex_position_data.len / 2);
-
-        gl.disableVertexAttribArray(0);
-        gl.disableVertexAttribArray(1);
+        const scale = 1;
+        const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*scale + 2;
+        try gc.renderGlyph(glyph, 100 + dx, 100, scale);
+        gc.render(0, @intCast(gl.GLint, glyph.segments.len), (w - 2) / @intToFloat(f32, glyph.x_max - glyph.x_min));
 
         c.SDL_GL_SwapWindow(window);
     }
