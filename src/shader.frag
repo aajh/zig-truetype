@@ -1,11 +1,11 @@
 #version 410 core
 
 uniform isamplerBuffer curves;
-uniform int glyph_start;
-uniform int glyph_len;
 
 layout(location = 0) in vec2 glyph_coordinate;
 layout(location = 1) in float pixels_in_funit;
+layout(location = 2) flat in int glyph_start;
+layout(location = 3) flat in int glyph_end;
 
 out vec4 color;
 
@@ -127,7 +127,7 @@ vec2 getCurvePoint(int curve_i, int point_i) {
 float sdGlyph(vec2 p) {
     float distance = 1.0 / 0.0;
     int winding = 0;
-    for (int i = glyph_start; i < glyph_start + glyph_len; ++i) {
+    for (int i = glyph_start; i < glyph_end; ++i) {
         vec2 p0 = getCurvePoint(i, 0);
         vec2 p1 = getCurvePoint(i, 1);
         vec2 p2 = getCurvePoint(i, 2);
