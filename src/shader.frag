@@ -3,9 +3,9 @@
 uniform isamplerBuffer curves;
 uniform int glyph_start;
 uniform int glyph_len;
-uniform float pixels_in_funit;
 
 layout(location = 0) in vec2 glyph_coordinate;
+layout(location = 1) in float pixels_in_funit;
 
 out vec4 color;
 
