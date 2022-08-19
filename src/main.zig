@@ -739,6 +739,7 @@ const GraphicsContext = struct {
     vertex_array: gl.GLuint = 0,
     shader      : gl.GLuint = 0,
 
+    vertex_index_buffer           : gl.GLuint = 0,
     vertex_position_buffer        : gl.GLuint = 0,
     vertex_glyph_coordinate_buffer: gl.GLuint = 0,
     curves_buffer                 : gl.GLuint = 0,
@@ -751,12 +752,14 @@ const GraphicsContext = struct {
     glyph_len_location      : gl.GLint = 0,
     pixels_in_funit_location: gl.GLint = 0,
 
+    vertex_indices          : std.ArrayList(gl.GLushort),
     vertex_positions        : std.ArrayList(f32),
     vertex_glyph_coordinates: std.ArrayList(f32),
 
     fn init(gpa: Allocator, window: *c.SDL_Window) !GraphicsContext {
         var gc: GraphicsContext = .{
             .window = window,
+            .vertex_indices           = std.ArrayList(gl.GLushort).init(gpa),
             .vertex_positions         = std.ArrayList(f32).init(gpa),
             .vertex_glyph_coordinates = std.ArrayList(f32).init(gpa),
         };
@@ -856,11 +859,13 @@ const GraphicsContext = struct {
         errdefer gl.deleteProgram(gc.shader);
         gl.useProgram(gc.shader);
 
+        gl.genBuffers(1, &gc.vertex_index_buffer);
         gl.genBuffers(1, &gc.vertex_position_buffer);
         gl.genBuffers(1, &gc.vertex_glyph_coordinate_buffer);
         gl.genBuffers(1, &gc.curves_buffer);
         errdefer {
             const buffers = [_]gl.GLuint {
+                gc.vertex_index_buffer,
                 gc.vertex_position_buffer,
                 gc.vertex_glyph_coordinate_buffer,
                 gc.curves_buffer,
@@ -871,10 +876,10 @@ const GraphicsContext = struct {
         gl.genTextures(1, &gc.curves_texture);
         errdefer gl.deleteTextures(1, &gc.curves_texture);
 
-        gc.screen_size_location = gl.getUniformLocation(gc.shader, "screen_size");
-        gc.curves_location = gl.getUniformLocation(gc.shader, "curves");
-        gc.glyph_start_location = gl.getUniformLocation(gc.shader, "glyph_start");
-        gc.glyph_len_location = gl.getUniformLocation(gc.shader, "glyph_len");
+        gc.screen_size_location     = gl.getUniformLocation(gc.shader, "screen_size");
+        gc.curves_location          = gl.getUniformLocation(gc.shader, "curves");
+        gc.glyph_start_location     = gl.getUniformLocation(gc.shader, "glyph_start");
+        gc.glyph_len_location       = gl.getUniformLocation(gc.shader, "glyph_len");
         gc.pixels_in_funit_location = gl.getUniformLocation(gc.shader, "pixels_in_funit");
 
         return gc;
@@ -883,6 +888,7 @@ const GraphicsContext = struct {
     fn deinit(gc: *GraphicsContext) void {
         gl.deleteTextures(1, &gc.curves_texture);
         var buffers = [_]gl.GLuint {
+            gc.vertex_index_buffer,
             gc.vertex_position_buffer,
             gc.vertex_glyph_coordinate_buffer,
             gc.curves_buffer,
@@ -896,6 +902,13 @@ const GraphicsContext = struct {
     }
 
     fn renderGlyph(gc: *GraphicsContext, glyph: Glyph, x0: f32, y0: f32, scale: f32) !void {
+        const i = @intCast(gl.GLushort, gc.vertex_indices.items.len);
+        const vertex_indices_data = [_]gl.GLushort {
+            i    , i + 1, i + 2,
+            i + 2, i + 1, i + 3,
+        };
+        try gc.vertex_indices.appendSlice(&vertex_indices_data);
+
         const x = x0 - 1;
         const y = y0 - 1;
         const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*scale + 2;
@@ -905,9 +918,6 @@ const GraphicsContext = struct {
             x, y,
             x + w, y,
             x, y + h,
-
-            x, y + h,
-            x + w, y,
             x + w, y + h,
         };
         try gc.vertex_positions.appendSlice(&vertex_position_data);
@@ -918,9 +928,6 @@ const GraphicsContext = struct {
             @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_min) - fip,
             @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
             @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
-
-            @intToFloat(f32, glyph.x_min) - fip, @intToFloat(f32, glyph.y_max) + fip,
-            @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_min) - fip,
             @intToFloat(f32, glyph.x_max) + fip, @intToFloat(f32, glyph.y_max) + fip,
         };
         try gc.vertex_glyph_coordinates.appendSlice(&vertex_glyph_coordinate_data);
@@ -928,6 +935,9 @@ const GraphicsContext = struct {
 
     fn render(gc: *GraphicsContext, glyph_start: gl.GLint, glyph_len: gl.GLint, pixels_in_funit: f32) void {
         gl.useProgram(gc.shader);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gc.vertex_index_buffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLushort)*gc.vertex_indices.items.len), gc.vertex_indices.items.ptr, gl.DYNAMIC_DRAW);
 
         gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_position_buffer);
         gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(f32)*gc.vertex_positions.items.len), gc.vertex_positions.items.ptr, gl.DYNAMIC_DRAW);
@@ -955,7 +965,7 @@ const GraphicsContext = struct {
         gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_coordinate_buffer);
         gl.vertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 0, null);
 
-        gl.drawArrays(gl.TRIANGLES, 0, @intCast(gl.GLsizei, gc.vertex_positions.items.len / 2));
+        gl.drawElements(gl.TRIANGLES, @intCast(gl.GLsizei, gc.vertex_indices.items.len), gl.UNSIGNED_SHORT, null);
 
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
