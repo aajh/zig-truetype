@@ -1222,14 +1222,6 @@ pub fn main() !void {
     };
     defer font.deinit();
 
-    const codepoint_1 = 'a';
-    const glyph_index_1 = font.cmap.codepointToGlyphIndex(codepoint_1);
-    std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint_1, glyph_index_1 });
-
-    const codepoint_2 = 'b';
-    const glyph_index_2 = font.cmap.codepointToGlyphIndex(codepoint_2);
-    std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint_2, glyph_index_2 });
-
     std.debug.print("\n", .{});
 
     if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
@@ -1280,14 +1272,17 @@ pub fn main() !void {
     }
 
     var frame_timer = try std.time.Timer.start();
+    var frame_time: f64 = 0;
     var frames: u32 = 0;
     var dx: f32 = 0;
     var quit = false;
     while (!quit) : ({ dx += 0.1; frames += 1; }) {
+        if (dx > 500) dx = 0;
+
         const current_timer_time = frame_timer.read();
         if (current_timer_time >= std.time.ns_per_s) {
-            const frame_time = @intToFloat(f64, current_timer_time) / 1000 / 1000 / @intToFloat(f64, frames);
-            std.debug.print("Frame time is {d:.2}ms or {d:.2}fps\n", .{ frame_time,  1000/frame_time });
+            frame_time = @intToFloat(f64, current_timer_time) / 1000 / 1000 / @intToFloat(f64, frames);
+            //std.debug.print("Frame time is {d:.2}ms or {d:.2}fps\n", .{ frame_time,  1000/frame_time });
             frame_timer.reset();
             frames = 0;
         }
@@ -1308,11 +1303,16 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+        const frame_time_text = try std.fmt.allocPrint(gpa, "{d:.2}ms ({d:.2}fps)", .{ frame_time, 1000/frame_time });
+        defer gpa.free(frame_time_text);
+        try gc.drawText(frame_time_text, 100, 1200 - 50, high_dpi_factor*16);
+
         const text = "The quick brown fox jumps over the lazy dog";
         try gc.drawText(text, 100 + dx, 50, high_dpi_factor*12);
         try gc.drawText(text, 100 + dx, 100, high_dpi_factor*16);
-        try gc.drawGlyph(glyph_index_1, 100 + dx, 200, @intToFloat(f32, font.head_table.units_per_em));
-        try gc.drawGlyph(glyph_index_2, 100 + dx, 800, high_dpi_factor*16);
+        const text_2 = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG";
+        try gc.drawText(text_2, 100 + dx, 150 + dx, high_dpi_factor*16);
+        try gc.drawGlyph(68, 100 + dx, 500, @intToFloat(f32, font.head_table.units_per_em));
 
         gc.flush();
 
