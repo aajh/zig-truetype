@@ -511,9 +511,15 @@ fn readCoordinates(reader: anytype, flags: []u8, coordinates: []i16, IS_SHORT: u
     }
 }
 
-const Glyph = struct {
-    const Point = Vector(2, i16);
+const Point = Vector(2, i16);
 
+const QuadraticBezierCurve = packed struct {
+    p0: Point,
+    p1: Point,
+    p2: Point,
+};
+
+const Glyph = struct {
     fn dot(a: Point, b: Point) f32 {
         return a[0]*b[0] + a[1]*b[1];
     }
@@ -526,12 +532,6 @@ const Glyph = struct {
     fn length(v: Point) f32 {
         return std.math.sqrt(dot2(v));
     }
-
-    const QuadraticBezierCurve = packed struct {
-        p0: Point,
-        p1: Point,
-        p2: Point,
-    };
 
     gpa: Allocator,
 
@@ -771,14 +771,73 @@ const Glyph = struct {
     }
 };
 
-const AtlasGlyph = struct {
-    x_min: i16,
-    y_min: i16,
-    x_max: i16,
-    y_max: i16,
+const GlyphAtlas = struct {
+    const AtlasGlyph = struct {
+        x_min: i16,
+        y_min: i16,
+        x_max: i16,
+        y_max: i16,
 
-    start: i32,
-    end  : i32,
+        start: i32,
+        end  : i32,
+    };
+
+    gpa: Allocator,
+    font: *Font,
+    glyphs: std.AutoHashMap(u32, AtlasGlyph),
+    curves: std.ArrayList(QuadraticBezierCurve),
+    new_curves: bool = false,
+
+    fn init(gpa: Allocator, font: *Font) GlyphAtlas {
+        return .{
+            .gpa = gpa,
+            .font = font,
+            .glyphs = std.AutoHashMap(u32, AtlasGlyph).init(gpa),
+            .curves = std.ArrayList(QuadraticBezierCurve).init(gpa),
+        };
+    }
+
+    fn deinit(self: *GlyphAtlas) void {
+        self.glyphs.deinit();
+        self.curves.deinit();
+    }
+
+    fn getGlyph(self: *GlyphAtlas, glyph_index: u32) !?AtlasGlyph {
+        return self.glyphs.get(glyph_index) orelse {
+            const font_glyph = try self.font.getGlyph(glyph_index);
+            defer font_glyph.deinit();
+
+            const start = self.curves.items.len;
+            try self.curves.appendSlice(font_glyph.segments);
+            const end = self.curves.items.len;
+
+            const atlas_glyph = AtlasGlyph{
+                .x_min = font_glyph.x_min,
+                .y_min = font_glyph.y_min,
+                .x_max = font_glyph.x_max,
+                .y_max = font_glyph.y_max,
+                .start = @intCast(i32, start),
+                .end   = @intCast(i32, end),
+            };
+            try self.glyphs.put(glyph_index, atlas_glyph);
+            self.new_curves = true;
+            return atlas_glyph;
+        };
+    }
+
+    fn uploadCurves(self: *GlyphAtlas, texture_buffer: gl.GLuint, texture: gl.GLuint) void {
+        if (!self.new_curves) return;
+
+        gl.bindBuffer(gl.TEXTURE_BUFFER, texture_buffer);
+        // TODO: Upload only new curves.
+        gl.bufferData(gl.TEXTURE_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(QuadraticBezierCurve)*self.curves.items.len), self.curves.items.ptr, gl.STATIC_DRAW);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_BUFFER, texture);
+        gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, texture_buffer);
+
+        self.new_curves = false;
+    }
 };
 
 const GraphicsContext = struct {
@@ -808,16 +867,28 @@ const GraphicsContext = struct {
     vertex_glyph_starts     : std.ArrayList(gl.GLint),
     vertex_glyph_ends       : std.ArrayList(gl.GLint),
 
-    fn init(gpa: Allocator, window: *c.SDL_Window) !GraphicsContext {
+    atlas                   : GlyphAtlas,
+
+    fn init(gpa: Allocator, window: *c.SDL_Window, font: *Font) !GraphicsContext {
         var gc: GraphicsContext = .{
             .window = window,
             .vertex_indices           = std.ArrayList(gl.GLushort).init(gpa),
             .vertex_positions         = std.ArrayList(f32).init(gpa),
             .vertex_glyph_coordinates = std.ArrayList(f32).init(gpa),
-            .vertex_pixels_per_funits  = std.ArrayList(f32).init(gpa),
+            .vertex_pixels_per_funits = std.ArrayList(f32).init(gpa),
             .vertex_glyph_starts      = std.ArrayList(gl.GLint).init(gpa),
             .vertex_glyph_ends        = std.ArrayList(gl.GLint).init(gpa),
+            .atlas                    = GlyphAtlas.init(gpa, font),
         };
+        errdefer {
+            gc.vertex_indices.deinit();
+            gc.vertex_positions.deinit();
+            gc.vertex_glyph_coordinates.deinit();
+            gc.vertex_pixels_per_funits.deinit();
+            gc.vertex_glyph_starts.deinit();
+            gc.vertex_glyph_ends.deinit();
+            gc.atlas.deinit();
+        }
 
         gc.gl_context = c.SDL_GL_CreateContext(window) orelse {
             logSdlError("SDL_GL_CreateContext", @src());
@@ -965,9 +1036,15 @@ const GraphicsContext = struct {
         gc.vertex_pixels_per_funits.deinit();
         gc.vertex_glyph_starts.deinit();
         gc.vertex_glyph_ends.deinit();
+        gc.atlas.deinit();
     }
 
-    fn drawGlyph(gc: *GraphicsContext, glyph: AtlasGlyph, x0: f32, y0: f32, pixels_per_em: f32, units_per_em: u16) !void {
+    fn drawGlyph(gc: *GraphicsContext, glyph_index: u32, x0: f32, y0: f32, pixels_per_em: f32) !void {
+        const glyph = (try gc.atlas.getGlyph(glyph_index)) orelse {
+            // The glyph_index has no glyph to render, i.e. it is whitespace or similar.
+            return;
+        };
+
         const i = @intCast(gl.GLushort, gc.vertex_indices.items.len / 6 * 4);
         const vertex_indices_data = [_]gl.GLushort {
             i    , i + 1, i + 2,
@@ -976,7 +1053,7 @@ const GraphicsContext = struct {
         try gc.vertex_indices.appendSlice(&vertex_indices_data);
 
         // pixels_per_funit
-        const ppf = pixels_per_em / @intToFloat(f32, units_per_em);
+        const ppf = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
 
         const x = x0 - 1;
         const y = y0 - 1;
@@ -1008,6 +1085,8 @@ const GraphicsContext = struct {
     }
 
     fn flush(gc: *GraphicsContext) void {
+        gc.atlas.uploadCurves(gc.curves_buffer, gc.curves_texture);
+
         gl.useProgram(gc.shader);
 
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gc.vertex_index_buffer);
@@ -1051,6 +1130,9 @@ const GraphicsContext = struct {
 
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
+        gl.disableVertexAttribArray(2);
+        gl.disableVertexAttribArray(3);
+        gl.disableVertexAttribArray(4);
 
         gc.vertex_indices.clearRetainingCapacity();
         gc.vertex_positions.clearRetainingCapacity();
@@ -1067,9 +1149,11 @@ fn glGetProcAddress(window: *c.SDL_Window, proc: [:0]const u8) ?*const anyopaque
 }
 
 pub fn main() !void {
-    var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_instance.deinit();
-    var arena = arena_instance.allocator();
+    //var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    //defer arena_instance.deinit();
+    //var arena = arena_instance.allocator();
+    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = gpa_instance.allocator();
 
     var font = font: {
         var directory = std.fs.cwd();
@@ -1077,18 +1161,17 @@ pub fn main() !void {
         //var font_file = try directory.openFile("Komrade-Regular.otf", .{ .read = true });
         defer font_file.close();
 
-        break :font try Font.initWithFile(arena, font_file);
+        break :font try Font.initWithFile(gpa, font_file);
     };
     defer font.deinit();
 
-    const codepoint = 'B';
-    const glyph_index = font.cmap.codepointToGlyphIndex(codepoint);
-    std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
+    const codepoint_1 = 'a';
+    const glyph_index_1 = font.cmap.codepointToGlyphIndex(codepoint_1);
+    std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint_1, glyph_index_1 });
 
-    std.debug.print("\n", .{});
-    const glyph = try font.getGlyph(glyph_index);
-    defer glyph.deinit();
-
+    const codepoint_2 = 'b';
+    const glyph_index_2 = font.cmap.codepointToGlyphIndex(codepoint_2);
+    std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint_2, glyph_index_2 });
 
     std.debug.print("\n", .{});
 
@@ -1128,7 +1211,7 @@ pub fn main() !void {
 
     c.SDL_SetWindowMinimumSize(window, 100, 100);
 
-    var gc = try GraphicsContext.init(arena, window);
+    var gc = try GraphicsContext.init(gpa, window, &font);
     defer gc.deinit();
 
     const high_dpi_factor = getHighDpiFactorGL(window);
@@ -1139,23 +1222,6 @@ pub fn main() !void {
         return error.SDLGLSetSwapInterval;
     }
 
-    gl.bindBuffer(gl.TEXTURE_BUFFER, gc.curves_buffer);
-    gl.bufferData(gl.TEXTURE_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(Glyph.QuadraticBezierCurve)*glyph.segments.len), glyph.segments.ptr, gl.STATIC_DRAW);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_BUFFER, gc.curves_texture);
-    gl.texBuffer(gl.TEXTURE_BUFFER, gl.RG16I, gc.curves_buffer);
-
-    const atlas_glyph = AtlasGlyph{
-        .x_min = glyph.x_min,
-        .y_min = glyph.y_min,
-        .x_max = glyph.x_max,
-        .y_max = glyph.y_max,
-
-        .start = 0,
-        .end   = @intCast(i32, 0 + glyph.segments.len),
-    };
-
     var frame_timer = try std.time.Timer.start();
     var frames: u32 = 0;
     var dx: f32 = 0;
@@ -1163,7 +1229,8 @@ pub fn main() !void {
     while (!quit) : ({ dx += 0.1; frames += 1; }) {
         const current_timer_time = frame_timer.read();
         if (current_timer_time >= std.time.ns_per_s) {
-            std.debug.print("Frame time is {d:.2}ms or {d}fps\n", .{ @intToFloat(f64, std.time.ms_per_s) / @intToFloat(f64, frames), frames });
+            const frame_time = @intToFloat(f64, current_timer_time) / 1000 / 1000 / @intToFloat(f64, frames);
+            std.debug.print("Frame time is {d:.2}ms or {d:.2}fps\n", .{ frame_time,  1000/frame_time });
             frame_timer.reset();
             frames = 0;
         }
@@ -1184,9 +1251,12 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 50, high_dpi_factor*8, font.head_table.units_per_em);
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 100, high_dpi_factor*16, font.head_table.units_per_em);
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 200, @intToFloat(f32, font.head_table.units_per_em), font.head_table.units_per_em);
+        try gc.drawGlyph(glyph_index_1, 100 + dx, 50, high_dpi_factor*8);
+        try gc.drawGlyph(glyph_index_1, 100 + dx, 100, high_dpi_factor*16);
+        try gc.drawGlyph(glyph_index_1, 100 + dx, 200, @intToFloat(f32, font.head_table.units_per_em));
+        try gc.drawGlyph(glyph_index_2, 100 + dx, 800, high_dpi_factor*16);
+        try gc.drawGlyph(glyph_index_2, 100 + dx, 900, @intToFloat(f32, font.head_table.units_per_em));
+
         gc.flush();
 
         c.SDL_GL_SwapWindow(window);
