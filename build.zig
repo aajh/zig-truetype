@@ -15,11 +15,17 @@ pub fn build(b: *Builder) !void {
         exe.addIncludeDir("/usr/local/include");
     }
 
+    exe.linkLibC();
+    exe.linkSystemLibrary("c++");
+    exe.addIncludeDir("lib/harfbuzz/src");
+    exe.addCSourceFile("lib/harfbuzz/src/harfbuzz.cc", &[_][]const u8{"-std=c++20"});
+
     exe.linkSystemLibrary("SDL2");
     exe.addPackage(.{
         .name = "gl",
         .path = std.build.FileSource.relative("lib/gl_4v0.zig")
     });
+
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());

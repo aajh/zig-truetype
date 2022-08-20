@@ -481,9 +481,11 @@ const Font = struct {
         return null;
     }
 
-    fn getGlyph(font: Font, glyph_index: u32) !Glyph {
+    fn getGlyph(font: Font, glyph_index: u32) !?Glyph {
         const glyph_location = try font.loca_table.glyphIndexToLocation(glyph_index);
-        std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
+        //std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
+
+        if (glyph_location.length == 0) return null;
 
         var stream = std.io.fixedBufferStream(font.font_file_content);
         var reader = stream.reader();
@@ -544,7 +546,7 @@ const Glyph = struct {
 
     fn init(gpa: Allocator, reader: anytype) !Glyph {
         const number_of_contours_i16 = try reader.readIntBig(i16);
-        std.debug.print("The glyph has number_of_contours of {d}\n", .{ number_of_contours_i16 });
+        //std.debug.print("The glyph has number_of_contours of {d}\n", .{ number_of_contours_i16 });
         if (number_of_contours_i16 < 0) {
             std.debug.print("The glyph is a compound glyph, which are not supported\n", .{});
             return error.UnsupportedGlyph;
@@ -555,7 +557,7 @@ const Glyph = struct {
         const y_min = try reader.readIntBig(i16);
         const x_max = try reader.readIntBig(i16);
         const y_max = try reader.readIntBig(i16);
-        std.debug.print("x_min {d}, y_min {d}, x_max {d}, y_max {d}\n", .{ x_min, y_min, x_max, y_max });
+        //std.debug.print("x_min {d}, y_min {d}, x_max {d}, y_max {d}\n", .{ x_min, y_min, x_max, y_max });
 
         var end_points_of_contours = try gpa.alloc(u16, number_of_contours);
         defer gpa.free(end_points_of_contours);
@@ -567,7 +569,7 @@ const Glyph = struct {
         if (number_of_contours > 0) {
             points_length += 1;
         }
-        std.debug.print("End points of contours: {any}, points_length: {d}\n", .{ end_points_of_contours, points_length });
+        //std.debug.print("End points of contours: {any}, points_length: {d}\n", .{ end_points_of_contours, points_length });
 
         const instruction_length = try reader.readIntBig(u16);
         try reader.skipBytes(instruction_length * @sizeOf(u8), .{});
@@ -596,17 +598,17 @@ const Glyph = struct {
                 }
             }
         }
-        std.debug.print("Glyph flags: {any}\n", .{ flags });
+        //std.debug.print("Glyph flags: {any}\n", .{ flags });
 
         var x_coordinates: []i16 = try gpa.alloc(i16, points_length);
         defer gpa.free(x_coordinates);
         try readCoordinates(reader, flags, x_coordinates, X_IS_SHORT, X_SAME_OR_POSITIVE);
-        std.debug.print("x_coordinates: {any}\n", .{ x_coordinates });
+        //std.debug.print("x_coordinates: {any}\n", .{ x_coordinates });
 
         var y_coordinates: []i16 = try gpa.alloc(i16, points_length);
         defer gpa.free(y_coordinates);
         try readCoordinates(reader, flags, y_coordinates, Y_IS_SHORT, Y_SAME_OR_POSITIVE);
-        std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
+        //std.debug.print("y_coordinates: {any}\n", .{ y_coordinates });
 
         var last_contour_end: u16 = 0;
         var segment_count: u16 = 0;
@@ -784,7 +786,7 @@ const GlyphAtlas = struct {
 
     gpa: Allocator,
     font: *Font,
-    glyphs: std.AutoHashMap(u32, AtlasGlyph),
+    glyphs: std.AutoHashMap(u32, ?AtlasGlyph),
     curves: std.ArrayList(QuadraticBezierCurve),
     new_curves: bool = false,
 
@@ -792,7 +794,7 @@ const GlyphAtlas = struct {
         return .{
             .gpa = gpa,
             .font = font,
-            .glyphs = std.AutoHashMap(u32, AtlasGlyph).init(gpa),
+            .glyphs = std.AutoHashMap(u32, ?AtlasGlyph).init(gpa),
             .curves = std.ArrayList(QuadraticBezierCurve).init(gpa),
         };
     }
@@ -804,7 +806,10 @@ const GlyphAtlas = struct {
 
     fn getGlyph(self: *GlyphAtlas, glyph_index: u32) !?AtlasGlyph {
         return self.glyphs.get(glyph_index) orelse {
-            const font_glyph = try self.font.getGlyph(glyph_index);
+            const font_glyph = (try self.font.getGlyph(glyph_index)) orelse {
+                try self.glyphs.put(glyph_index, null);
+                return null;
+            };
             defer font_glyph.deinit();
 
             const start = self.curves.items.len;
@@ -868,8 +873,18 @@ const GraphicsContext = struct {
     vertex_glyph_ends       : std.ArrayList(gl.GLint),
 
     atlas                   : GlyphAtlas,
+    font_blob               : ?*c.hb_blob_t,
+    hb_face                 : ?*c.hb_face_t,
+    hb_font                 : ?*c.hb_font_t,
 
     fn init(gpa: Allocator, window: *c.SDL_Window, font: *Font) !GraphicsContext {
+        const font_blob = c.hb_blob_create(font.font_file_content.ptr, @intCast(c_uint, font.font_file_content.len), c.HB_MEMORY_MODE_READONLY, null, null);
+        errdefer c.hb_blob_destroy(font_blob);
+        const hb_face = c.hb_face_create(font_blob, 0);
+        errdefer c.hb_face_destroy(hb_face);
+        const hb_font = c.hb_font_create(hb_face);
+        errdefer c.hb_font_destroy(hb_font);
+
         var gc: GraphicsContext = .{
             .window = window,
             .vertex_indices           = std.ArrayList(gl.GLushort).init(gpa),
@@ -879,6 +894,9 @@ const GraphicsContext = struct {
             .vertex_glyph_starts      = std.ArrayList(gl.GLint).init(gpa),
             .vertex_glyph_ends        = std.ArrayList(gl.GLint).init(gpa),
             .atlas                    = GlyphAtlas.init(gpa, font),
+            .font_blob                = font_blob,
+            .hb_face                  = hb_face,
+            .hb_font                  = hb_font,
         };
         errdefer {
             gc.vertex_indices.deinit();
@@ -1037,6 +1055,10 @@ const GraphicsContext = struct {
         gc.vertex_glyph_starts.deinit();
         gc.vertex_glyph_ends.deinit();
         gc.atlas.deinit();
+
+        c.hb_font_destroy(gc.hb_font);
+        c.hb_face_destroy(gc.hb_face);
+        c.hb_blob_destroy(gc.font_blob);
     }
 
     fn drawGlyph(gc: *GraphicsContext, glyph_index: u32, x0: f32, y0: f32, pixels_per_em: f32) !void {
@@ -1055,8 +1077,8 @@ const GraphicsContext = struct {
         // pixels_per_funit
         const ppf = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
 
-        const x = x0 - 1;
-        const y = y0 - 1;
+        const x = x0 - 1 + @intToFloat(f32, glyph.x_min)*ppf;
+        const y = y0 - 1 + @intToFloat(f32, glyph.y_min)*ppf;
         const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*ppf + 2;
         const h = @intToFloat(f32, glyph.y_max - glyph.y_min)*ppf + 2;
 
@@ -1082,6 +1104,41 @@ const GraphicsContext = struct {
 
         try gc.vertex_glyph_starts.appendNTimes(glyph.start, 4);
         try gc.vertex_glyph_ends.appendNTimes(glyph.end, 4);
+    }
+
+    fn drawText(gc: *GraphicsContext, text: []const u8, x: f32, y: f32, pixels_per_em: f32) !void {
+        const hb_buffer = c.hb_buffer_create();
+        defer c.hb_buffer_destroy(hb_buffer);
+        c.hb_buffer_add_utf8(hb_buffer, &text[0], @intCast(c_int, text.len), 0, @intCast(c_int, text.len));
+
+        c.hb_buffer_set_direction(hb_buffer, c.HB_DIRECTION_LTR);
+        c.hb_buffer_set_script(hb_buffer, c.HB_SCRIPT_LATIN);
+        c.hb_buffer_set_language(hb_buffer, c.hb_language_from_string("en", -1));
+
+        c.hb_shape(gc.hb_font, hb_buffer, null, 0);
+
+        var glyph_count: u32 = undefined;
+        var glyph_info = c.hb_buffer_get_glyph_infos(hb_buffer, &glyph_count);
+        var glyph_pos = c.hb_buffer_get_glyph_positions(hb_buffer, &glyph_count);
+
+        const pixels_per_funit = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
+
+        var cursor_x: f32 = x;
+        var cursor_y: f32 = y;
+        var index: usize = 0;
+        while (index < glyph_count) : (index += 1) {
+            const glyph_index = glyph_info[index].codepoint;
+            const x_offset = @intToFloat(f32, glyph_pos[index].x_offset) * pixels_per_funit;
+            const y_offset = @intToFloat(f32, glyph_pos[index].y_offset) * pixels_per_funit;
+            const x_advance = @intToFloat(f32, glyph_pos[index].x_advance) * pixels_per_funit;
+            const y_advance = @intToFloat(f32, glyph_pos[index].y_advance) * pixels_per_funit;
+
+            try gc.drawGlyph(glyph_index, cursor_x + x_offset, cursor_y - y_offset, pixels_per_em);
+
+            cursor_x += x_advance;
+            cursor_y += y_advance;
+        }
+
     }
 
     fn flush(gc: *GraphicsContext) void {
@@ -1251,11 +1308,11 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        try gc.drawGlyph(glyph_index_1, 100 + dx, 50, high_dpi_factor*8);
-        try gc.drawGlyph(glyph_index_1, 100 + dx, 100, high_dpi_factor*16);
+        const text = "The quick brown fox jumps over the lazy dog";
+        try gc.drawText(text, 100 + dx, 50, high_dpi_factor*12);
+        try gc.drawText(text, 100 + dx, 100, high_dpi_factor*16);
         try gc.drawGlyph(glyph_index_1, 100 + dx, 200, @intToFloat(f32, font.head_table.units_per_em));
         try gc.drawGlyph(glyph_index_2, 100 + dx, 800, high_dpi_factor*16);
-        try gc.drawGlyph(glyph_index_2, 100 + dx, 900, @intToFloat(f32, font.head_table.units_per_em));
 
         gc.flush();
 
