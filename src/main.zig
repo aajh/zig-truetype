@@ -55,15 +55,6 @@ const TableDirectoryEntry = packed struct {
     length  : u32,
 };
 
-fn getTableDirectoryEntry(entries: []TableDirectoryEntry, tag: *const [TableDirectoryEntry.TAG_LENGTH]u8) ?TableDirectoryEntry {
-    for (entries) |entry| {
-        if (std.mem.eql(u8, entry.tag[0..entry.tag.len], tag)) {
-            return entry;
-        }
-    }
-    return null;
-}
-
 const HeadTable = packed struct {
     version            : u32,
     font_revision      : u32,
@@ -326,6 +317,180 @@ const LocaTable = struct {
                 };
             },
         }
+    }
+};
+
+const Font = struct {
+    gpa: Allocator,
+    font_file_content: []const u8,
+
+    table_directory: []TableDirectoryEntry,
+    head_table: HeadTable = undefined,
+    cmap: CmapFormat4 = undefined,
+    loca_table: LocaTable = undefined,
+    glyf_table_offset: u64 = undefined,
+
+    const MAX_FONT_FILE_SIZE = 100 * 1024 * 1024;
+
+    fn initWithFile(gpa: Allocator, font_file: std.fs.File) !Font {
+        const font_file_content = try font_file.readToEndAlloc(gpa, MAX_FONT_FILE_SIZE);
+
+        var stream = std.io.fixedBufferStream(font_file_content);
+        var reader = stream.reader();
+        var seekable_stream = stream.seekableStream();
+
+        var offset_subtable = try reader.readStruct(OffsetSubtable);
+        bswapAllIntFieldsToHost(OffsetSubtable, &offset_subtable);
+        std.debug.print("{}\n", .{ offset_subtable });
+        std.debug.print("isTrueTypeFont: {}\n", .{ offset_subtable.isTrueTypeFont() });
+        std.debug.print("isOpenTypeFont: {}\n", .{ offset_subtable.isOpenTypeFont() });
+        std.debug.print("\n", .{});
+
+        if (!offset_subtable.isTrueTypeFont()) {
+            std.debug.print("Not a valid TrueType Font\n", .{});
+            return error.InvalidFontFile;
+        }
+
+        if (offset_subtable.num_tables > 32) {
+            std.debug.print("Too many tables in the font file\n", .{});
+            return error.InvalidFontFile;
+        }
+
+        var table_directory = try gpa.alloc(TableDirectoryEntry, offset_subtable.num_tables);
+        errdefer gpa.free(table_directory);
+        for (table_directory) |*entry| {
+            entry.* = try reader.readStruct(TableDirectoryEntry);
+            bswapAllIntFieldsToHost(TableDirectoryEntry, entry);
+            std.debug.print("{s}: {}\n", .{ entry.tag, entry });
+        }
+
+        var font = Font{
+            .gpa = gpa,
+            .font_file_content = font_file_content,
+            .table_directory = table_directory,
+        };
+
+
+        const head_table_directory_entry = font.getTableDirectoryEntry("head") orelse {
+            std.debug.print("The TrueType font file didn't include \"head\" table\n", .{});
+            return error.InvalidFontFile;
+        };
+        try seekable_stream.seekTo(head_table_directory_entry.offset);
+        font.head_table = try reader.readStruct(HeadTable);
+        bswapAllIntFieldsToHost(HeadTable, &font.head_table);
+
+        std.debug.print("\n", .{});
+        std.debug.print("{}\n", .{ font.head_table });
+        std.debug.print("HeadTable isValid {}\n", .{ font.head_table.isValid() });
+
+
+        //const maxp_table_directory_entry = font.getTableDirectoryEntry("maxp") orelse {
+            //std.debug.print("The TrueType font file didn't include \"maxp\" table\n", .{});
+            //return error.InvalidFontFile;
+        //};
+        //try seekable_stream.seekTo(maxp_table_directory_entry.offset);
+        //var maxp_table = try reader.readStruct(MaxpTable);
+        //bswapAllIntFieldsToHost(MaxpTable, &maxp_table);
+        //std.debug.print("\n", .{});
+        //std.debug.print("{}\n", .{ maxp_table });
+
+
+        const cmap_table_directory_entry = font.getTableDirectoryEntry("cmap") orelse {
+            std.debug.print("The TrueType font file didn't include \"cmap\" table\n", .{});
+            return error.InvalidFontFile;
+        };
+        try seekable_stream.seekTo(cmap_table_directory_entry.offset);
+        var cmap_table = try reader.readStruct(CmapTable);
+        bswapAllIntFieldsToHost(CmapTable, &cmap_table);
+        std.debug.print("\n", .{});
+        std.debug.print("{}\n", .{ cmap_table });
+        if (!cmap_table.isValid()) {
+            std.debug.print("The cmap table was invalid\n", .{});
+            return error.InvalidFontFile;
+        }
+
+        const INVALID_PLATFORM_ID: u16 = 0xFFFF;
+        var selected_cmap_subtable: CmapSubtable = .{
+            .platform_id = INVALID_PLATFORM_ID,
+            .platform_specific_id = 0xFFFF,
+            .offset = 0,
+        };
+        var cmap_subtable_i: u16 = 0;
+        while (cmap_subtable_i < cmap_table.num_subtables) : (cmap_subtable_i += 1) {
+            var subtable = try reader.readStruct(CmapSubtable);
+            bswapAllIntFieldsToHost(CmapSubtable, &subtable);
+            std.debug.print("{}\n", .{ subtable });
+
+            if (subtable.platform_id == 0) {
+                if (selected_cmap_subtable.platform_id == INVALID_PLATFORM_ID) {
+                    selected_cmap_subtable = subtable;
+                } else if (selected_cmap_subtable.platform_specific_id != 4) {
+                    selected_cmap_subtable = subtable;
+                }
+            }
+        }
+        if (selected_cmap_subtable.platform_id == INVALID_PLATFORM_ID) {
+            std.debug.print("Couldn't find a Unicode cmap table\n", .{});
+            return error.UnsupportedFontFile;
+        }
+        std.debug.print("Selected cmap table: {}\n", .{ selected_cmap_subtable });
+
+        const cmap_offset = cmap_table_directory_entry.offset + selected_cmap_subtable.offset;
+        try seekable_stream.seekTo(cmap_offset);
+        const cmap_format = try reader.readIntBig(u16);
+        std.debug.print("Selected cmap table has format {d}\n", .{ cmap_format });
+        if (cmap_format != 4) {
+            std.debug.print("Unsupported cmap table format\n", .{});
+            return error.UnsupportedFontFile;
+        }
+
+        try seekable_stream.seekBy(-@sizeOf(u16));
+        font.cmap = try CmapFormat4.init(gpa, seekable_stream, reader);
+        errdefer font.cmap.deinit();
+
+
+        const loca_table_directory_entry = font.getTableDirectoryEntry("loca") orelse {
+            std.debug.print("The TrueType font file didn't include \"loca\" table\n", .{});
+            return error.InvalidFontFile;
+        };
+        font.loca_table = try LocaTable.init(gpa, loca_table_directory_entry, font.head_table, seekable_stream, reader);
+        errdefer font.loca_table.deinit();
+
+        const glyf_table_directory_entry = font.getTableDirectoryEntry("glyf") orelse {
+            std.debug.print("The TrueType font file didn't include \"glyf\" table\n", .{});
+            return error.InvalidFontFile;
+        };
+        font.glyf_table_offset = glyf_table_directory_entry.offset;
+
+        return font;
+    }
+
+    fn deinit(font: *Font) void {
+        font.loca_table.deinit();
+        font.cmap.deinit();
+        font.gpa.free(font.table_directory);
+        font.gpa.free(font.font_file_content);
+    }
+
+    fn getTableDirectoryEntry(font: Font, tag: *const [TableDirectoryEntry.TAG_LENGTH]u8) ?TableDirectoryEntry {
+        for (font.table_directory) |entry| {
+            if (std.mem.eql(u8, entry.tag[0..entry.tag.len], tag)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    fn getGlyph(font: Font, glyph_index: u32) !Glyph {
+        const glyph_location = try font.loca_table.glyphIndexToLocation(glyph_index);
+        std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
+
+        var stream = std.io.fixedBufferStream(font.font_file_content);
+        var reader = stream.reader();
+        var seekable_stream = stream.seekableStream();
+
+        try seekable_stream.seekTo(font.glyf_table_offset + glyph_location.offset);
+        return try Glyph.init(font.gpa, reader);
     }
 };
 
@@ -906,145 +1071,22 @@ pub fn main() !void {
     defer arena_instance.deinit();
     var arena = arena_instance.allocator();
 
-    var font_file_content: []u8 = content: {
+    var font = font: {
         var directory = std.fs.cwd();
         var font_file = try directory.openFile("AvenirNext-Regular-08.ttf", .{ .read = true });
         //var font_file = try directory.openFile("Komrade-Regular.otf", .{ .read = true });
         defer font_file.close();
 
-        const max_size = 100 * 1024 * 1024;
-        break :content try font_file.readToEndAlloc(arena, max_size);
+        break :font try Font.initWithFile(arena, font_file);
     };
-    defer arena.free(font_file_content);
+    defer font.deinit();
 
-    var stream = std.io.fixedBufferStream(font_file_content);
-    var reader = stream.reader();
-    var seekable_stream = stream.seekableStream();
-
-    var offset_subtable = try reader.readStruct(OffsetSubtable);
-    bswapAllIntFieldsToHost(OffsetSubtable, &offset_subtable);
-    std.debug.print("{}\n", .{ offset_subtable });
-    std.debug.print("isTrueTypeFont: {}\n", .{ offset_subtable.isTrueTypeFont() });
-    std.debug.print("isOpenTypeFont: {}\n", .{ offset_subtable.isOpenTypeFont() });
-    std.debug.print("\n", .{});
-
-    if (!offset_subtable.isTrueTypeFont()) {
-        std.debug.print("Not a valid TrueType Font\n", .{});
-        return error.InvalidFontFile;
-    }
-
-    if (offset_subtable.num_tables > 32) {
-        std.debug.print("Too many tables in the font file\n", .{});
-        return error.InvalidFontFile;
-    }
-
-    var table_directory = try arena.alloc(TableDirectoryEntry, offset_subtable.num_tables);
-    defer arena.free(table_directory);
-    for (table_directory) |*entry| {
-        entry.* = try reader.readStruct(TableDirectoryEntry);
-        bswapAllIntFieldsToHost(TableDirectoryEntry, entry);
-        std.debug.print("{s}: {}\n", .{ entry.tag, entry });
-    }
-
-
-    const head_table_directory_entry = getTableDirectoryEntry(table_directory, "head") orelse {
-        std.debug.print("The TrueType font file didn't include \"head\" table\n", .{});
-        return error.InvalidFontFile;
-    };
-    try seekable_stream.seekTo(head_table_directory_entry.offset);
-    var head_table = try reader.readStruct(HeadTable);
-    bswapAllIntFieldsToHost(HeadTable, &head_table);
-
-    std.debug.print("\n", .{});
-    std.debug.print("{}\n", .{ head_table });
-    std.debug.print("HeadTable isValid {}\n", .{ head_table.isValid() });
-
-
-    const maxp_table_directory_entry = getTableDirectoryEntry(table_directory, "maxp") orelse {
-        std.debug.print("The TrueType font file didn't include \"maxp\" table\n", .{});
-        return error.InvalidFontFile;
-    };
-    try seekable_stream.seekTo(maxp_table_directory_entry.offset);
-    var maxp_table = try reader.readStruct(MaxpTable);
-    bswapAllIntFieldsToHost(MaxpTable, &maxp_table);
-    std.debug.print("\n", .{});
-    std.debug.print("{}\n", .{ maxp_table });
-
-
-    const cmap_table_directory_entry = getTableDirectoryEntry(table_directory, "cmap") orelse {
-        std.debug.print("The TrueType font file didn't include \"cmap\" table\n", .{});
-        return error.InvalidFontFile;
-    };
-    try seekable_stream.seekTo(cmap_table_directory_entry.offset);
-    var cmap_table = try reader.readStruct(CmapTable);
-    bswapAllIntFieldsToHost(CmapTable, &cmap_table);
-    std.debug.print("\n", .{});
-    std.debug.print("{}\n", .{ cmap_table });
-    if (!cmap_table.isValid()) {
-        std.debug.print("The cmap table was invalid\n", .{});
-        return error.InvalidFontFile;
-    }
-
-    const INVALID_PLATFORM_ID: u16 = 0xFFFF;
-    var selected_cmap_subtable: CmapSubtable = .{
-        .platform_id = INVALID_PLATFORM_ID,
-        .platform_specific_id = 0xFFFF,
-        .offset = 0,
-    };
-    var cmap_subtable_i: u16 = 0;
-    while (cmap_subtable_i < cmap_table.num_subtables) : (cmap_subtable_i += 1) {
-        var subtable = try reader.readStruct(CmapSubtable);
-        bswapAllIntFieldsToHost(CmapSubtable, &subtable);
-        std.debug.print("{}\n", .{ subtable });
-
-        if (subtable.platform_id == 0) {
-            if (selected_cmap_subtable.platform_id == INVALID_PLATFORM_ID) {
-                selected_cmap_subtable = subtable;
-            } else if (selected_cmap_subtable.platform_specific_id != 4) {
-                selected_cmap_subtable = subtable;
-            }
-        }
-    }
-    if (selected_cmap_subtable.platform_id == INVALID_PLATFORM_ID) {
-        std.debug.print("Couldn't find a Unicode cmap table\n", .{});
-        return error.UnsupportedFontFile;
-    }
-    std.debug.print("Selected cmap table: {}\n", .{ selected_cmap_subtable });
-
-    const cmap_offset = cmap_table_directory_entry.offset + selected_cmap_subtable.offset;
-    try seekable_stream.seekTo(cmap_offset);
-    const cmap_format = try reader.readIntBig(u16);
-    std.debug.print("Selected cmap table has format {d}\n", .{ cmap_format });
-    if (cmap_format != 4) {
-        std.debug.print("Unsupported cmap table format\n", .{});
-        return error.UnsupportedFontFile;
-    }
-
-    try seekable_stream.seekBy(-@sizeOf(u16));
-    var cmap = try CmapFormat4.init(arena, seekable_stream, reader);
-    defer cmap.deinit();
     const codepoint = 'B';
-    const glyph_index = cmap.codepointToGlyphIndex(codepoint);
+    const glyph_index = font.cmap.codepointToGlyphIndex(codepoint);
     std.debug.print("Codepoint {c} has glyph index {d}\n", .{ codepoint, glyph_index });
 
-
-    const loca_table_directory_entry = getTableDirectoryEntry(table_directory, "loca") orelse {
-        std.debug.print("The TrueType font file didn't include \"loca\" table\n", .{});
-        return error.InvalidFontFile;
-    };
-    const loca_table = try LocaTable.init(arena, loca_table_directory_entry, head_table, seekable_stream, reader);
-    defer loca_table.deinit();
-    const glyph_location = try loca_table.glyphIndexToLocation(glyph_index);
     std.debug.print("\n", .{});
-    std.debug.print("The glyph has offset and length {}\n", .{ glyph_location });
-
-
-    const glyf_table_directory_entry = getTableDirectoryEntry(table_directory, "glyf") orelse {
-        std.debug.print("The TrueType font file didn't include \"glyf\" table\n", .{});
-        return error.InvalidFontFile;
-    };
-    try seekable_stream.seekTo(glyf_table_directory_entry.offset + glyph_location.offset);
-    const glyph = try Glyph.init(arena, reader);
+    const glyph = try font.getGlyph(glyph_index);
     defer glyph.deinit();
 
 
@@ -1086,11 +1128,10 @@ pub fn main() !void {
 
     c.SDL_SetWindowMinimumSize(window, 100, 100);
 
-    const high_dpi_factor = getHighDpiFactorGL(window);
-    _ = high_dpi_factor;
-
     var gc = try GraphicsContext.init(arena, window);
     defer gc.deinit();
+
+    const high_dpi_factor = getHighDpiFactorGL(window);
 
     // Disable vsync for better idea of the performance
     if (c.SDL_GL_SetSwapInterval(0) != 0) {
@@ -1143,9 +1184,9 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 50, high_dpi_factor*8, head_table.units_per_em);
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 100, high_dpi_factor*16, head_table.units_per_em);
-        try gc.drawGlyph(atlas_glyph, 100 + dx, 200, @intToFloat(f32, head_table.units_per_em), head_table.units_per_em);
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 50, high_dpi_factor*8, font.head_table.units_per_em);
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 100, high_dpi_factor*16, font.head_table.units_per_em);
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 200, @intToFloat(f32, font.head_table.units_per_em), font.head_table.units_per_em);
         gc.flush();
 
         c.SDL_GL_SwapWindow(window);
