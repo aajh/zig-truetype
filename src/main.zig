@@ -802,7 +802,7 @@ const GraphicsContext = struct {
         gc.vertex_glyph_ends.deinit();
     }
 
-    fn renderGlyph(gc: *GraphicsContext, glyph: AtlasGlyph, x0: f32, y0: f32, pixels_per_em: f32, units_per_em: u16) !void {
+    fn drawGlyph(gc: *GraphicsContext, glyph: AtlasGlyph, x0: f32, y0: f32, pixels_per_em: f32, units_per_em: u16) !void {
         const i = @intCast(gl.GLushort, gc.vertex_indices.items.len / 6 * 4);
         const vertex_indices_data = [_]gl.GLushort {
             i    , i + 1, i + 2,
@@ -842,7 +842,7 @@ const GraphicsContext = struct {
         try gc.vertex_glyph_ends.appendNTimes(glyph.end, 4);
     }
 
-    fn render(gc: *GraphicsContext) void {
+    fn flush(gc: *GraphicsContext) void {
         gl.useProgram(gc.shader);
 
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gc.vertex_index_buffer);
@@ -906,11 +906,20 @@ pub fn main() !void {
     defer arena_instance.deinit();
     var arena = arena_instance.allocator();
 
-    var font_file = try std.fs.cwd().openFile("AvenirNext-Regular-08.ttf", .{ .read = true });
-    //var font_file = try std.fs.cwd().openFile("Komrade-Regular.otf", .{ .read = true });
-    defer font_file.close();
+    var font_file_content: []u8 = content: {
+        var directory = std.fs.cwd();
+        var font_file = try directory.openFile("AvenirNext-Regular-08.ttf", .{ .read = true });
+        //var font_file = try directory.openFile("Komrade-Regular.otf", .{ .read = true });
+        defer font_file.close();
 
-    var reader = font_file.reader();
+        const max_size = 100 * 1024 * 1024;
+        break :content try font_file.readToEndAlloc(arena, max_size);
+    };
+    defer arena.free(font_file_content);
+
+    var stream = std.io.fixedBufferStream(font_file_content);
+    var reader = stream.reader();
+    var seekable_stream = stream.seekableStream();
 
     var offset_subtable = try reader.readStruct(OffsetSubtable);
     bswapAllIntFieldsToHost(OffsetSubtable, &offset_subtable);
@@ -942,7 +951,7 @@ pub fn main() !void {
         std.debug.print("The TrueType font file didn't include \"head\" table\n", .{});
         return error.InvalidFontFile;
     };
-    try font_file.seekTo(head_table_directory_entry.offset);
+    try seekable_stream.seekTo(head_table_directory_entry.offset);
     var head_table = try reader.readStruct(HeadTable);
     bswapAllIntFieldsToHost(HeadTable, &head_table);
 
@@ -955,7 +964,7 @@ pub fn main() !void {
         std.debug.print("The TrueType font file didn't include \"maxp\" table\n", .{});
         return error.InvalidFontFile;
     };
-    try font_file.seekTo(maxp_table_directory_entry.offset);
+    try seekable_stream.seekTo(maxp_table_directory_entry.offset);
     var maxp_table = try reader.readStruct(MaxpTable);
     bswapAllIntFieldsToHost(MaxpTable, &maxp_table);
     std.debug.print("\n", .{});
@@ -966,7 +975,7 @@ pub fn main() !void {
         std.debug.print("The TrueType font file didn't include \"cmap\" table\n", .{});
         return error.InvalidFontFile;
     };
-    try font_file.seekTo(cmap_table_directory_entry.offset);
+    try seekable_stream.seekTo(cmap_table_directory_entry.offset);
     var cmap_table = try reader.readStruct(CmapTable);
     bswapAllIntFieldsToHost(CmapTable, &cmap_table);
     std.debug.print("\n", .{});
@@ -1003,7 +1012,7 @@ pub fn main() !void {
     std.debug.print("Selected cmap table: {}\n", .{ selected_cmap_subtable });
 
     const cmap_offset = cmap_table_directory_entry.offset + selected_cmap_subtable.offset;
-    try font_file.seekTo(cmap_offset);
+    try seekable_stream.seekTo(cmap_offset);
     const cmap_format = try reader.readIntBig(u16);
     std.debug.print("Selected cmap table has format {d}\n", .{ cmap_format });
     if (cmap_format != 4) {
@@ -1011,8 +1020,8 @@ pub fn main() !void {
         return error.UnsupportedFontFile;
     }
 
-    try font_file.seekBy(-@sizeOf(u16));
-    var cmap = try CmapFormat4.init(arena, font_file.seekableStream(), reader);
+    try seekable_stream.seekBy(-@sizeOf(u16));
+    var cmap = try CmapFormat4.init(arena, seekable_stream, reader);
     defer cmap.deinit();
     const codepoint = 'B';
     const glyph_index = cmap.codepointToGlyphIndex(codepoint);
@@ -1023,7 +1032,7 @@ pub fn main() !void {
         std.debug.print("The TrueType font file didn't include \"loca\" table\n", .{});
         return error.InvalidFontFile;
     };
-    const loca_table = try LocaTable.init(arena, loca_table_directory_entry, head_table, font_file.seekableStream(), reader);
+    const loca_table = try LocaTable.init(arena, loca_table_directory_entry, head_table, seekable_stream, reader);
     defer loca_table.deinit();
     const glyph_location = try loca_table.glyphIndexToLocation(glyph_index);
     std.debug.print("\n", .{});
@@ -1034,7 +1043,7 @@ pub fn main() !void {
         std.debug.print("The TrueType font file didn't include \"glyf\" table\n", .{});
         return error.InvalidFontFile;
     };
-    try font_file.seekTo(glyf_table_directory_entry.offset + glyph_location.offset);
+    try seekable_stream.seekTo(glyf_table_directory_entry.offset + glyph_location.offset);
     const glyph = try Glyph.init(arena, reader);
     defer glyph.deinit();
 
@@ -1134,10 +1143,10 @@ pub fn main() !void {
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        try gc.renderGlyph(atlas_glyph, 100 + dx, 50, high_dpi_factor*8, head_table.units_per_em);
-        try gc.renderGlyph(atlas_glyph, 100 + dx, 100, high_dpi_factor*16, head_table.units_per_em);
-        try gc.renderGlyph(atlas_glyph, 100 + dx, 200, @intToFloat(f32, head_table.units_per_em), head_table.units_per_em);
-        gc.render();
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 50, high_dpi_factor*8, head_table.units_per_em);
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 100, high_dpi_factor*16, head_table.units_per_em);
+        try gc.drawGlyph(atlas_glyph, 100 + dx, 200, @intToFloat(f32, head_table.units_per_em), head_table.units_per_em);
+        gc.flush();
 
         c.SDL_GL_SwapWindow(window);
     }
