@@ -1251,7 +1251,7 @@ const GraphicsContext = struct {
             {
                 const eye = Vector(3, f32){ -1.2, -0.3, 0.5 };
                 const center = Vector(3, f32){ 0, 0, 0 };
-                const up = Vector(3, f32){ 0, 1, 0 };
+                const up = Vector(3, f32){ 1, 1, 0 };
 
                 var Z = eye - center;
                 Z = Z / @splat(3, std.math.sqrt(Z[0]*Z[0] + Z[1]*Z[1] + Z[2]*Z[2]));
@@ -1310,6 +1310,7 @@ const GraphicsContext = struct {
         gl.disableVertexAttribArray(1);
         gl.disableVertexAttribArray(2);
         gl.disableVertexAttribArray(3);
+        gl.disableVertexAttribArray(4);
 
         gc.vertex_indices.clearRetainingCapacity();
         gc.vertex_positions.clearRetainingCapacity();

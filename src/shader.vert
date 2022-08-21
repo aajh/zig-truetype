@@ -30,11 +30,16 @@ void main() {
             pixel_expansion = vec2( 1,  1);
             break;
     }
+    pixel_expansion = 2.0 * pixel_expansion / vec2(screen_size);
 
-    vec2 pre_transform_position = 2.0 * ((vertex_position_screen_space + pixel_expansion) / vec2(screen_size)) - 1.0;
-    gl_Position = projection_matrix * view_matrix * vec4(pre_transform_position, 0, 1);
+    vec4 delta = projection_matrix * view_matrix * vec4(pixel_expansion, 0, 0);
+    vec2 pixel_expansion_factor = 2.0 / vec2(screen_size) / abs(delta.xy);
 
-    glyph_coordinate = vertex_glyph_coordinate + vertex_funits_per_pixel*pixel_expansion;
+    vec2 pre_transform_position = 2.0 * vertex_position_screen_space / vec2(screen_size) - 1.0;
+    gl_Position = projection_matrix * view_matrix * vec4(pre_transform_position + pixel_expansion_factor * pixel_expansion, 0, 1);
+
+    vec2 funits_per_unit = 0.5 * vertex_funits_per_pixel * vec2(screen_size);
+    glyph_coordinate = vertex_glyph_coordinate + funits_per_unit*pixel_expansion_factor*pixel_expansion;
     glyph_start = vertex_glyph_start;
     glyph_end = vertex_glyph_end;
 }
