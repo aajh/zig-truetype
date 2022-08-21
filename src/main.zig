@@ -1344,7 +1344,7 @@ pub fn main() !void {
     var dx: f32 = 0;
     var quit = false;
     while (!quit) : ({ dx += 0.1; frames += 1; }) {
-        if (dx > 500) dx = 0;
+        if (dx > 80 * high_dpi_factor) dx = 0;
 
         const current_timer_time = frame_timer.read();
         if (current_timer_time >= std.time.ns_per_s) {
@@ -1385,15 +1385,32 @@ pub fn main() !void {
             const text_size = high_dpi_factor*16;
             var text_width: f32 = 0;
             gc.getTextSize(shaped_text, text_size, &text_width, null);
-            var ascender_size = gc.getFontAscenderSize(text_size);
+            const ascender_size = gc.getFontAscenderSize(text_size);
 
-            try gc.drawText(shaped_text, drawable_width - text_width - 50, drawable_height - ascender_size - 50, high_dpi_factor*16);
+            try gc.drawText(shaped_text, drawable_width - text_width - 25 * high_dpi_factor, drawable_height - ascender_size - 25 * high_dpi_factor, high_dpi_factor*16);
         }
 
-        try gc.drawText(text, 100 + dx, 50, high_dpi_factor*12);
-        try gc.drawText(text, 100 + dx, 100, high_dpi_factor*16);
-        try gc.drawText(text_2, 100 + dx, 150 + dx, high_dpi_factor*16);
-        try gc.drawGlyph(68, 100 + dx, 500, @intToFloat(f32, font.head_table.units_per_em));
+        var i: u32 = 0;
+        var y: f32 = drawable_height - 25 * high_dpi_factor;
+        while (i < 17) : (i += 1) {
+            const text_size = high_dpi_factor * @intToFloat(f32, i + 8);
+            const ascender_size = gc.getFontAscenderSize(text_size);
+            const descender_size = gc.getFontDescenderSize(text_size);
+
+            const text_size_text = try std.fmt.allocPrint(gpa, "{d}px:", .{ text_size / high_dpi_factor });
+            defer gpa.free(text_size_text);
+            const shaped_text = try gc.shapeText(text_size_text);
+            defer c.hb_buffer_destroy(shaped_text);
+            try gc.drawText(shaped_text, 25 * high_dpi_factor, y - ascender_size, text_size);
+
+            try gc.drawText(text, 100 * high_dpi_factor, y - ascender_size, text_size);
+
+            y -= ascender_size - descender_size + 3 * high_dpi_factor;
+        }
+
+        try gc.drawText(text, 25 * high_dpi_factor + dx, 25 * high_dpi_factor + dx, high_dpi_factor*16);
+        try gc.drawText(text_2, 25 * high_dpi_factor + dx, 40 * high_dpi_factor + dx, high_dpi_factor*16);
+        //try gc.drawGlyph(68, 25 * high_dpi_factor + dx, 250 * high_dpi_factor, @intToFloat(f32, font.head_table.units_per_em));
 
         gc.flush();
 

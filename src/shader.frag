@@ -140,12 +140,12 @@ float sdGlyph(vec2 p) {
     return winding != 0 ? -distance : distance;
 }
 
-const bool USE_FONT_SMOOTHING = true;
+// Additional 0.2 is to simulate Apple-style font smoothing for retina mac screens.
+const float FONT_SMOOTHING = 0.0;
 
 void main() {
     float signed_distance = sdGlyph(glyph_coordinate);
-    // Additional 0.2 is to simulate Apple-style font smoothing.
-    float alpha = clamp((USE_FONT_SMOOTHING ? 0.7 : 0.5) - signed_distance*pixels_per_funit, 0, 1);
+    float alpha = clamp(0.5 + FONT_SMOOTHING - signed_distance*pixels_per_funit, 0, 1);
     color = vec4(0, 0, 0, alpha);
 }
 
