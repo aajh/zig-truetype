@@ -884,6 +884,7 @@ const GraphicsContext = struct {
     vertex_index_buffer           : gl.GLuint = 0,
     vertex_position_buffer        : gl.GLuint = 0,
     vertex_glyph_coordinate_buffer: gl.GLuint = 0,
+    vertex_funits_per_pixel_buffer: gl.GLuint = 0,
     vertex_glyph_start_buffer     : gl.GLuint = 0,
     vertex_glyph_end_buffer       : gl.GLuint = 0,
     curves_buffer                 : gl.GLuint = 0,
@@ -896,6 +897,7 @@ const GraphicsContext = struct {
     vertex_indices          : std.ArrayList(gl.GLushort),
     vertex_positions        : std.ArrayList(f32),
     vertex_glyph_coordinates: std.ArrayList(f32),
+    vertex_funits_per_pixels: std.ArrayList(f32),
     vertex_glyph_starts     : std.ArrayList(gl.GLint),
     vertex_glyph_ends       : std.ArrayList(gl.GLint),
 
@@ -917,6 +919,7 @@ const GraphicsContext = struct {
             .vertex_indices           = std.ArrayList(gl.GLushort).init(gpa),
             .vertex_positions         = std.ArrayList(f32).init(gpa),
             .vertex_glyph_coordinates = std.ArrayList(f32).init(gpa),
+            .vertex_funits_per_pixels = std.ArrayList(f32).init(gpa),
             .vertex_glyph_starts      = std.ArrayList(gl.GLint).init(gpa),
             .vertex_glyph_ends        = std.ArrayList(gl.GLint).init(gpa),
             .atlas                    = GlyphAtlas.init(gpa, font),
@@ -928,6 +931,7 @@ const GraphicsContext = struct {
             gc.vertex_indices.deinit();
             gc.vertex_positions.deinit();
             gc.vertex_glyph_coordinates.deinit();
+            gc.vertex_funits_per_pixels.deinit();
             gc.vertex_glyph_starts.deinit();
             gc.vertex_glyph_ends.deinit();
             gc.atlas.deinit();
@@ -1031,6 +1035,7 @@ const GraphicsContext = struct {
         gl.genBuffers(1, &gc.vertex_index_buffer);
         gl.genBuffers(1, &gc.vertex_position_buffer);
         gl.genBuffers(1, &gc.vertex_glyph_coordinate_buffer);
+        gl.genBuffers(1, &gc.vertex_funits_per_pixel_buffer);
         gl.genBuffers(1, &gc.vertex_glyph_start_buffer);
         gl.genBuffers(1, &gc.vertex_glyph_end_buffer);
         gl.genBuffers(1, &gc.curves_buffer);
@@ -1039,6 +1044,7 @@ const GraphicsContext = struct {
                 gc.vertex_index_buffer,
                 gc.vertex_position_buffer,
                 gc.vertex_glyph_coordinate_buffer,
+                gc.vertex_funits_per_pixel_buffer,
                 gc.vertex_glyph_start_buffer,
                 gc.vertex_glyph_end_buffer,
                 gc.curves_buffer,
@@ -1061,6 +1067,7 @@ const GraphicsContext = struct {
             gc.vertex_index_buffer,
             gc.vertex_position_buffer,
             gc.vertex_glyph_coordinate_buffer,
+            gc.vertex_funits_per_pixel_buffer,
             gc.vertex_glyph_start_buffer,
             gc.vertex_glyph_end_buffer,
             gc.curves_buffer,
@@ -1073,6 +1080,7 @@ const GraphicsContext = struct {
         gc.vertex_indices.deinit();
         gc.vertex_positions.deinit();
         gc.vertex_glyph_coordinates.deinit();
+        gc.vertex_funits_per_pixels.deinit();
         gc.vertex_glyph_starts.deinit();
         gc.vertex_glyph_ends.deinit();
         gc.atlas.deinit();
@@ -1145,10 +1153,10 @@ const GraphicsContext = struct {
         // pixels_per_funit
         const ppf = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
 
-        const x = x0 - 1 + @intToFloat(f32, glyph.x_min)*ppf;
-        const y = y0 - 1 + @intToFloat(f32, glyph.y_min)*ppf;
-        const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*ppf + 2;
-        const h = @intToFloat(f32, glyph.y_max - glyph.y_min)*ppf + 2;
+        const x = x0 + @intToFloat(f32, glyph.x_min)*ppf;
+        const y = y0 + @intToFloat(f32, glyph.y_min)*ppf;
+        const w = @intToFloat(f32, glyph.x_max - glyph.x_min)*ppf;
+        const h = @intToFloat(f32, glyph.y_max - glyph.y_min)*ppf;
 
         const vertex_position_data = [_]f32{
             x, y,
@@ -1158,15 +1166,15 @@ const GraphicsContext = struct {
         };
         try gc.vertex_positions.appendSlice(&vertex_position_data);
 
-        // funits_per_pixel
-        const fpp = 1 / ppf;
         const vertex_glyph_coordinate_data = [_]f32 {
-            @intToFloat(f32, glyph.x_min) - fpp, @intToFloat(f32, glyph.y_min) - fpp,
-            @intToFloat(f32, glyph.x_max) + fpp, @intToFloat(f32, glyph.y_min) - fpp,
-            @intToFloat(f32, glyph.x_min) - fpp, @intToFloat(f32, glyph.y_max) + fpp,
-            @intToFloat(f32, glyph.x_max) + fpp, @intToFloat(f32, glyph.y_max) + fpp,
+            @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_min),
+            @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_min),
+            @intToFloat(f32, glyph.x_min), @intToFloat(f32, glyph.y_max),
+            @intToFloat(f32, glyph.x_max), @intToFloat(f32, glyph.y_max),
         };
         try gc.vertex_glyph_coordinates.appendSlice(&vertex_glyph_coordinate_data);
+
+        try gc.vertex_funits_per_pixels.appendNTimes(1 / ppf, 8);
 
         try gc.vertex_glyph_starts.appendNTimes(glyph.start, 4);
         try gc.vertex_glyph_ends.appendNTimes(glyph.end, 4);
@@ -1216,14 +1224,19 @@ const GraphicsContext = struct {
         gl.vertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 0, null);
 
         gl.enableVertexAttribArray(2);
-        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_start_buffer);
-        gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLint)*gc.vertex_glyph_starts.items.len), gc.vertex_glyph_starts.items.ptr, gl.DYNAMIC_DRAW);
-        gl.vertexAttribPointer(2, 1, gl.INT, gl.FALSE, 0, null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_funits_per_pixel_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(f32)*gc.vertex_funits_per_pixels.items.len), gc.vertex_funits_per_pixels.items.ptr, gl.DYNAMIC_DRAW);
+        gl.vertexAttribPointer(2, 2, gl.FLOAT, gl.FALSE, 0, null);
 
         gl.enableVertexAttribArray(3);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_start_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLint)*gc.vertex_glyph_starts.items.len), gc.vertex_glyph_starts.items.ptr, gl.DYNAMIC_DRAW);
+        gl.vertexAttribPointer(3, 1, gl.INT, gl.FALSE, 0, null);
+
+        gl.enableVertexAttribArray(4);
         gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_end_buffer);
         gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLint)*gc.vertex_glyph_ends.items.len), gc.vertex_glyph_ends.items.ptr, gl.DYNAMIC_DRAW);
-        gl.vertexAttribPointer(3, 1, gl.INT, gl.FALSE, 0, null);
+        gl.vertexAttribPointer(4, 1, gl.INT, gl.FALSE, 0, null);
 
         var drawable_width: i32 = undefined;
         var drawable_height: i32 = undefined;
