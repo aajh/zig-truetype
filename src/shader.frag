@@ -3,9 +3,8 @@
 uniform isamplerBuffer curves;
 
 layout(location = 0) in vec2 glyph_coordinate;
-layout(location = 1) in float pixels_per_funit;
-layout(location = 2) flat in int glyph_start;
-layout(location = 3) flat in int glyph_end;
+layout(location = 1) flat in int glyph_start;
+layout(location = 2) flat in int glyph_end;
 
 out vec4 color;
 
@@ -144,6 +143,7 @@ float sdGlyph(vec2 p) {
 const float FONT_SMOOTHING = 0.0;
 
 void main() {
+    float pixels_per_funit = 1 / abs(dFdx(glyph_coordinate.x));
     float signed_distance = sdGlyph(glyph_coordinate);
     float alpha = clamp(0.5 + FONT_SMOOTHING - signed_distance*pixels_per_funit, 0, 1);
     color = vec4(0, 0, 0, alpha);
