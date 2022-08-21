@@ -123,29 +123,56 @@ vec2 getCurvePoint(int curve_i, int point_i) {
     return vec2(texelFetch(curves, coordinate));
 }
 
-float sdGlyph(vec2 p) {
+float sdGlyphInPixels(vec2 p_in_funits) {
+    vec2 pixels_per_funit = 1 / vec2(
+        abs(dFdx(p_in_funits.x)),
+        abs(dFdy(p_in_funits.y))
+    );
+    vec2 p_in_pixels = p_in_funits * pixels_per_funit;
+
+    float distance = 1.0 / 0.0;
+    int winding = 0;
+    for (int i = glyph_start; i < glyph_end; ++i) {
+        vec2 p0 = getCurvePoint(i, 0) * pixels_per_funit;
+        vec2 p1 = getCurvePoint(i, 1) * pixels_per_funit;
+        vec2 p2 = getCurvePoint(i, 2) * pixels_per_funit;
+
+        float d = approximateSdBezier(p_in_pixels, p0, p1, p2);
+        if (abs(d) < abs(distance)) {
+            distance = d;
+        }
+
+        winding += windingDelta(p_in_pixels, p0, p1, p2);
+    }
+    return winding != 0 ? -distance : distance;
+}
+
+float sdGlyphInPixelsUniformScaling(vec2 p_in_funits) {
     float distance = 1.0 / 0.0;
     int winding = 0;
     for (int i = glyph_start; i < glyph_end; ++i) {
         vec2 p0 = getCurvePoint(i, 0);
         vec2 p1 = getCurvePoint(i, 1);
         vec2 p2 = getCurvePoint(i, 2);
-        float d = approximateSdBezier(p, p0, p1, p2);
+
+        float d = approximateSdBezier(p_in_funits, p0, p1, p2);
         if (abs(d) < abs(distance)) {
             distance = d;
         }
-        winding += windingDelta(p, p0, p1, p2);
+
+        winding += windingDelta(p_in_funits, p0, p1, p2);
     }
-    return winding != 0 ? -distance : distance;
+
+    float pixels_per_funit = 1 / abs(dFdx(p_in_funits.x));
+    return (winding != 0 ? -distance : distance) * pixels_per_funit;
 }
 
 // Additional 0.2 is to simulate Apple-style font smoothing for retina mac screens.
 const float FONT_SMOOTHING = 0.0;
 
 void main() {
-    float pixels_per_funit = 1 / abs(dFdx(glyph_coordinate.x));
-    float signed_distance = sdGlyph(glyph_coordinate);
-    float alpha = clamp(0.5 + FONT_SMOOTHING - signed_distance*pixels_per_funit, 0, 1);
+    float signed_distance = sdGlyphInPixels(glyph_coordinate);
+    float alpha = clamp(0.5 + FONT_SMOOTHING - signed_distance, 0, 1);
     color = vec4(0, 0, 0, alpha);
 }
 
