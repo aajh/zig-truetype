@@ -891,8 +891,10 @@ const GraphicsContext = struct {
 
     curves_texture: gl.GLuint = 0,
 
-    screen_size_location    : gl.GLint = 0,
-    curves_location         : gl.GLint = 0,
+    screen_size_location      : gl.GLint = 0,
+    view_matrix_location      : gl.GLint = 0,
+    projection_matrix_location: gl.GLint = 0,
+    curves_location           : gl.GLint = 0,
 
     vertex_indices          : std.ArrayList(gl.GLushort),
     vertex_positions        : std.ArrayList(f32),
@@ -1055,8 +1057,10 @@ const GraphicsContext = struct {
         gl.genTextures(1, &gc.curves_texture);
         errdefer gl.deleteTextures(1, &gc.curves_texture);
 
-        gc.screen_size_location     = gl.getUniformLocation(gc.shader, "screen_size");
-        gc.curves_location          = gl.getUniformLocation(gc.shader, "curves");
+        gc.screen_size_location       = gl.getUniformLocation(gc.shader, "screen_size");
+        gc.view_matrix_location       = gl.getUniformLocation(gc.shader, "view_matrix");
+        gc.projection_matrix_location = gl.getUniformLocation(gc.shader, "projection_matrix");
+        gc.curves_location            = gl.getUniformLocation(gc.shader, "curves");
 
         return gc;
     }
@@ -1205,7 +1209,7 @@ const GraphicsContext = struct {
 
     }
 
-    fn flush(gc: *GraphicsContext) void {
+    fn flush(gc: *GraphicsContext, use_perspective: bool) void {
         gc.atlas.uploadCurves(gc.curves_buffer, gc.curves_texture);
 
         gl.useProgram(gc.shader);
@@ -1243,6 +1247,59 @@ const GraphicsContext = struct {
         c.SDL_GL_GetDrawableSize(gc.window, &drawable_width, &drawable_height);
         gl.uniform2ui(gc.screen_size_location, @intCast(gl.GLuint, drawable_width), @intCast(gl.GLuint, drawable_height));
 
+        if (use_perspective) {
+            {
+                const eye = Vector(3, f32){ -1.2, -0.3, 0.5 };
+                const center = Vector(3, f32){ 0, 0, 0 };
+                const up = Vector(3, f32){ 0, 1, 0 };
+
+                var Z = eye - center;
+                Z = Z / @splat(3, std.math.sqrt(Z[0]*Z[0] + Z[1]*Z[1] + Z[2]*Z[2]));
+                var Y = up;
+                var X = Vector(3, f32){ Y[1]*Z[2] - Y[2]*Z[1], Y[2]*Z[0] - Y[0]*Z[2], Y[0]*Z[1] - Y[1]*Z[0] };
+                Y = Vector(3, f32){ Z[1]*X[2] - Z[2]*X[1], Z[2]*X[0] - Z[0]*X[2], Z[0]*X[1] - Z[1]*X[0] };
+                X = X / @splat(3, std.math.sqrt(X[0]*X[0] + X[1]*X[1] + X[2]*X[2]));
+                Y = Y / @splat(3, std.math.sqrt(Y[0]*Y[0] + Y[1]*Y[1] + Y[2]*Y[2]));
+
+                const view_matrix_data = [_]f32{
+                    X[0], X[1], X[2], -(X[0]*eye[0] + X[1]*eye[1] + X[2]*eye[2]),
+                    Y[0], Y[1], Y[2], -(Y[0]*eye[0] + Y[1]*eye[1] + Y[2]*eye[2]),
+                    Z[0], Z[1], Z[2], -(Z[0]*eye[0] + Z[1]*eye[1] + Z[2]*eye[2]),
+                    0, 0, 0, 1,
+                };
+                gl.uniformMatrix4fv(gc.view_matrix_location, 1, gl.TRUE, &view_matrix_data[0]);
+            }
+            {
+                const angle_of_view = 90;
+                const image_aspect_ratio = @intToFloat(f32, drawable_width) / @intToFloat(f32, drawable_height);
+                const n = 0.1;
+                const f  = 100;
+
+                const scale = std.math.tan(@as(f32, angle_of_view * 0.5 * std.math.pi / 180.0)) * n;
+                const r = image_aspect_ratio * scale;
+                const l = -r;
+                const t = scale;
+                const b = -t;
+
+                const projection_matrix_data = [_]f32{
+                    2 * n / (r - l), 0, (r + l) / (r - l), 0,
+                    0, 2 * n / (t - b), (t + b) / (t - b), 0,
+                    0, 0, -(f + n) / (f - n), -2 * f * n / (f - n),
+                    0, 0, -1, 0,
+                };
+                gl.uniformMatrix4fv(gc.projection_matrix_location, 1, gl.TRUE, &projection_matrix_data[0]);
+            }
+        } else {
+            const identity_matrix = [_]f32{
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1,
+            };
+            gl.uniformMatrix4fv(gc.view_matrix_location, 1, gl.FALSE, &identity_matrix[0]);
+            gl.uniformMatrix4fv(gc.projection_matrix_location, 1, gl.FALSE, &identity_matrix[0]);
+        }
+
         gl.uniform1i(gc.curves_location, 0);
 
         gl.activeTexture(gl.TEXTURE0);
@@ -1257,6 +1314,7 @@ const GraphicsContext = struct {
         gc.vertex_indices.clearRetainingCapacity();
         gc.vertex_positions.clearRetainingCapacity();
         gc.vertex_glyph_coordinates.clearRetainingCapacity();
+        gc.vertex_funits_per_pixels.clearRetainingCapacity();
         gc.vertex_glyph_starts.clearRetainingCapacity();
         gc.vertex_glyph_ends.clearRetainingCapacity();
     }
@@ -1338,6 +1396,7 @@ pub fn main() !void {
     var frame_time: f64 = 0;
     var frames: u32 = 0;
     var dx: f32 = 0;
+    var use_perspective = false;
     var quit = false;
     while (!quit) : ({ dx += 0.1; frames += 1; }) {
         if (dx > 80 * high_dpi_factor) dx = 0;
@@ -1357,6 +1416,9 @@ pub fn main() !void {
                 c.SDL_KEYDOWN => {
                     if (event.key.keysym.sym == c.SDLK_ESCAPE) {
                         quit = true;
+                    }
+                    if (event.key.keysym.sym == c.SDLK_p) {
+                        use_perspective = !use_perspective;
                     }
                 },
                 else => {},
@@ -1408,7 +1470,7 @@ pub fn main() !void {
         try gc.drawText(text_2, 25 * high_dpi_factor + dx, 40 * high_dpi_factor + dx, high_dpi_factor*16);
         //try gc.drawGlyph(68, 25 * high_dpi_factor + dx, 250 * high_dpi_factor, @intToFloat(f32, font.head_table.units_per_em));
 
-        gc.flush();
+        gc.flush(use_perspective);
 
         c.SDL_GL_SwapWindow(window);
     }

@@ -174,5 +174,6 @@ void main() {
     float signed_distance = sdGlyphInPixels(glyph_coordinate);
     float alpha = clamp(0.5 + FONT_SMOOTHING - signed_distance, 0, 1);
     color = vec4(0, 0, 0, alpha);
+    //if (alpha < 1e-3) color = vec4(1,0,0,1);
 }
 
