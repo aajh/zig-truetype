@@ -84,6 +84,23 @@ const MaxpTable = packed struct {
     num_glyphs: u16,
 };
 
+const HheaTable = packed struct {
+    version                : u32,
+    ascent                 : i16,
+    descent                : i16,
+    line_gap               : i16,
+    advance_width_max      : u16,
+    min_left_side_bearing  : i16,
+    min_right_side_bearing : i16,
+    x_max_extent           : i16,
+    caret_slope_rise       : i16,
+    carte_slope_run        : i16,
+    caret_offset           : i16,
+    reserved               : i64,
+    metric_data_format     : i16,
+    num_of_long_hor_metrics: u16,
+};
+
 const CmapTable = packed struct {
     version      : u16,
     num_subtables: u16,
@@ -321,14 +338,15 @@ const LocaTable = struct {
 };
 
 const Font = struct {
-    gpa: Allocator,
+    gpa              : Allocator,
     font_file_content: []const u8,
 
-    table_directory: []TableDirectoryEntry,
-    head_table: HeadTable = undefined,
-    cmap: CmapFormat4 = undefined,
-    loca_table: LocaTable = undefined,
-    glyf_table_offset: u64 = undefined,
+    table_directory  : []TableDirectoryEntry,
+    head_table       : HeadTable   = undefined,
+    hhea_table       : HheaTable   = undefined,
+    cmap             : CmapFormat4 = undefined,
+    loca_table       : LocaTable   = undefined,
+    glyf_table_offset: u64         = undefined,
 
     const MAX_FONT_FILE_SIZE = 100 * 1024 * 1024;
 
@@ -393,6 +411,17 @@ const Font = struct {
         //bswapAllIntFieldsToHost(MaxpTable, &maxp_table);
         //std.debug.print("\n", .{});
         //std.debug.print("{}\n", .{ maxp_table });
+
+
+        const hhea_table_directory_entry = font.getTableDirectoryEntry("hhea") orelse {
+            std.debug.print("The TrueType font file didn't include \"hhea\" table\n", .{});
+            return error.InvalidFontFile;
+        };
+        try seekable_stream.seekTo(hhea_table_directory_entry.offset);
+        font.hhea_table = try reader.readStruct(HheaTable);
+        bswapAllIntFieldsToHost(HheaTable, &font.hhea_table);
+        std.debug.print("\n", .{});
+        std.debug.print("{}\n", .{ font.hhea_table });
 
 
         const cmap_table_directory_entry = font.getTableDirectoryEntry("cmap") orelse {
@@ -1061,6 +1090,53 @@ const GraphicsContext = struct {
         c.hb_blob_destroy(gc.font_blob);
     }
 
+    fn shapeText(gc: GraphicsContext, text: []const u8) !*c.hb_buffer_t {
+        const hb_buffer = c.hb_buffer_create() orelse {
+            return error.HbBufferCreateFailed;
+        };
+        c.hb_buffer_add_utf8(hb_buffer, &text[0], @intCast(c_int, text.len), 0, @intCast(c_int, text.len));
+
+        c.hb_buffer_set_direction(hb_buffer, c.HB_DIRECTION_LTR);
+        c.hb_buffer_set_script(hb_buffer, c.HB_SCRIPT_LATIN);
+        c.hb_buffer_set_language(hb_buffer, c.hb_language_from_string("en", -1));
+
+        c.hb_shape(gc.hb_font, hb_buffer, null, 0);
+
+        return hb_buffer;
+    }
+
+    fn getFontAscenderSize(gc: GraphicsContext, pixels_per_em: f32) f32 {
+        const pixels_per_funit = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
+        return @intToFloat(f32, gc.atlas.font.hhea_table.ascent) * pixels_per_funit;
+    }
+
+    fn getFontDescenderSize(gc: GraphicsContext, pixels_per_em: f32) f32 {
+        const pixels_per_funit = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
+        return @intToFloat(f32, gc.atlas.font.hhea_table.descent) * pixels_per_funit;
+    }
+
+    fn getTextSize(gc: GraphicsContext, shaped_text: ?*c.hb_buffer_t, pixels_per_em: f32, width: ?*f32, height: ?*f32) void {
+        const pixels_per_funit = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
+        if (width != null and shaped_text != null) {
+            var glyph_count: u32 = undefined;
+            var glyph_pos = c.hb_buffer_get_glyph_positions(shaped_text, &glyph_count);
+
+            var w: f32 = 0;
+            var index: usize = 0;
+            while (index < glyph_count) : (index += 1) {
+                const x_advance = @intToFloat(f32, glyph_pos[index].x_advance) * pixels_per_funit;
+                w += x_advance;
+            }
+            width.?.* = w;
+        }
+        if (height != null) {
+            const ascender = @intToFloat(f32, gc.atlas.font.hhea_table.ascent) * pixels_per_funit;
+            const descender = @intToFloat(f32, gc.atlas.font.hhea_table.descent) * pixels_per_funit;
+            const h = ascender - descender;
+            height.?.* = h;
+        }
+    }
+
     fn drawGlyph(gc: *GraphicsContext, glyph_index: u32, x0: f32, y0: f32, pixels_per_em: f32) !void {
         const glyph = (try gc.atlas.getGlyph(glyph_index)) orelse {
             // The glyph_index has no glyph to render, i.e. it is whitespace or similar.
@@ -1106,20 +1182,10 @@ const GraphicsContext = struct {
         try gc.vertex_glyph_ends.appendNTimes(glyph.end, 4);
     }
 
-    fn drawText(gc: *GraphicsContext, text: []const u8, x: f32, y: f32, pixels_per_em: f32) !void {
-        const hb_buffer = c.hb_buffer_create();
-        defer c.hb_buffer_destroy(hb_buffer);
-        c.hb_buffer_add_utf8(hb_buffer, &text[0], @intCast(c_int, text.len), 0, @intCast(c_int, text.len));
-
-        c.hb_buffer_set_direction(hb_buffer, c.HB_DIRECTION_LTR);
-        c.hb_buffer_set_script(hb_buffer, c.HB_SCRIPT_LATIN);
-        c.hb_buffer_set_language(hb_buffer, c.hb_language_from_string("en", -1));
-
-        c.hb_shape(gc.hb_font, hb_buffer, null, 0);
-
+    fn drawText(gc: *GraphicsContext, shaped_text: *c.hb_buffer_t, x: f32, y: f32, pixels_per_em: f32) !void {
         var glyph_count: u32 = undefined;
-        var glyph_info = c.hb_buffer_get_glyph_infos(hb_buffer, &glyph_count);
-        var glyph_pos = c.hb_buffer_get_glyph_positions(hb_buffer, &glyph_count);
+        var glyph_info = c.hb_buffer_get_glyph_infos(shaped_text, &glyph_count);
+        var glyph_pos = c.hb_buffer_get_glyph_positions(shaped_text, &glyph_count);
 
         const pixels_per_funit = pixels_per_em / @intToFloat(f32, gc.atlas.font.head_table.units_per_em);
 
@@ -1206,16 +1272,12 @@ fn glGetProcAddress(window: *c.SDL_Window, proc: [:0]const u8) ?*const anyopaque
 }
 
 pub fn main() !void {
-    //var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    //defer arena_instance.deinit();
-    //var arena = arena_instance.allocator();
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
     var gpa = gpa_instance.allocator();
 
     var font = font: {
         var directory = std.fs.cwd();
         var font_file = try directory.openFile("AvenirNext-Regular-08.ttf", .{ .read = true });
-        //var font_file = try directory.openFile("Komrade-Regular.otf", .{ .read = true });
         defer font_file.close();
 
         break :font try Font.initWithFile(gpa, font_file);
@@ -1271,6 +1333,11 @@ pub fn main() !void {
         return error.SDLGLSetSwapInterval;
     }
 
+    const text = try gc.shapeText("The quick brown fox jumps over the lazy dog");
+    defer c.hb_buffer_destroy(text);
+    const text_2 = try gc.shapeText("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG");
+    defer c.hb_buffer_destroy(text_2);
+
     var frame_timer = try std.time.Timer.start();
     var frame_time: f64 = 0;
     var frames: u32 = 0;
@@ -1300,17 +1367,31 @@ pub fn main() !void {
             }
         }
 
+        var drawable_width_int: i32 = undefined;
+        var drawable_height_int: i32 = undefined;
+        c.SDL_GL_GetDrawableSize(window, &drawable_width_int, &drawable_height_int);
+        const drawable_width = @intToFloat(f32, drawable_width_int);
+        const drawable_height = @intToFloat(f32, drawable_height_int);
+
         gl.clearColor(1, 1, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        const frame_time_text = try std.fmt.allocPrint(gpa, "{d:.2}ms ({d:.2}fps)", .{ frame_time, 1000/frame_time });
-        defer gpa.free(frame_time_text);
-        try gc.drawText(frame_time_text, 100, 1200 - 50, high_dpi_factor*16);
+        {
+            const frame_time_text = try std.fmt.allocPrint(gpa, "{d:.2}ms ({d:.2}fps)", .{ frame_time, 1000/frame_time });
+            defer gpa.free(frame_time_text);
+            const shaped_text = try gc.shapeText(frame_time_text);
+            defer c.hb_buffer_destroy(shaped_text);
 
-        const text = "The quick brown fox jumps over the lazy dog";
+            const text_size = high_dpi_factor*16;
+            var text_width: f32 = 0;
+            gc.getTextSize(shaped_text, text_size, &text_width, null);
+            var ascender_size = gc.getFontAscenderSize(text_size);
+
+            try gc.drawText(shaped_text, drawable_width - text_width - 50, drawable_height - ascender_size - 50, high_dpi_factor*16);
+        }
+
         try gc.drawText(text, 100 + dx, 50, high_dpi_factor*12);
         try gc.drawText(text, 100 + dx, 100, high_dpi_factor*16);
-        const text_2 = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG";
         try gc.drawText(text_2, 100 + dx, 150 + dx, high_dpi_factor*16);
         try gc.drawGlyph(68, 100 + dx, 500, @intToFloat(f32, font.head_table.units_per_em));
 
