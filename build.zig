@@ -11,7 +11,10 @@ pub fn build(b: *Builder) !void {
     exe.setBuildMode(mode);
     exe.install();
 
-    if (builtin.os.tag != .windows) {
+    if (builtin.os.tag == .windows) {
+        exe.addIncludeDir("C:\\include");
+        exe.addLibPath("C:\\lib");
+    } else {
         exe.addIncludeDir("/usr/local/include");
     }
 

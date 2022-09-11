@@ -16,10 +16,12 @@ fn logSdlError(message: []const u8, src: std.builtin.SourceLocation) void {
 
 fn getHighDpiFactorGL(window: *c.SDL_Window) f32 {
     var window_width: i32 = undefined;
-    c.SDL_GetWindowSize(window, &window_width, null);
+    var window_height: i32 = undefined;
+    c.SDL_GetWindowSize(window, &window_width, &window_height);
 
     var drawable_width: i32 = undefined;
-    c.SDL_GL_GetDrawableSize(window, &drawable_width, null);
+    var drawable_height: i32 = undefined;
+    c.SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
 
     return @intToFloat(f32, drawable_width) / @intToFloat(f32, window_width);
 }
@@ -457,12 +459,12 @@ const GraphicsContext = struct {
         gl.enableVertexAttribArray(3);
         gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_start_buffer);
         gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLint)*gc.vertex_glyph_starts.items.len), gc.vertex_glyph_starts.items.ptr, gl.DYNAMIC_DRAW);
-        gl.vertexAttribPointer(3, 1, gl.INT, gl.FALSE, 0, null);
+        gl.vertexAttribIPointer(3, 1, gl.INT, 0, null);
 
         gl.enableVertexAttribArray(4);
         gl.bindBuffer(gl.ARRAY_BUFFER, gc.vertex_glyph_end_buffer);
         gl.bufferData(gl.ARRAY_BUFFER, @intCast(gl.GLsizeiptr, @sizeOf(gl.GLint)*gc.vertex_glyph_ends.items.len), gc.vertex_glyph_ends.items.ptr, gl.DYNAMIC_DRAW);
-        gl.vertexAttribPointer(4, 1, gl.INT, gl.FALSE, 0, null);
+        gl.vertexAttribIPointer(4, 1, gl.INT, 0, null);
 
         var drawable_width: i32 = undefined;
         var drawable_height: i32 = undefined;
@@ -562,6 +564,15 @@ pub fn main() !void {
     defer font.deinit();
 
     std.debug.print("\n", .{});
+
+    if (c.SDL_SetHint(c.SDL_HINT_WINDOWS_DPI_AWARENESS, "system") != c.SDL_TRUE) {
+        logSdlError("SDL_SetHint", @src());
+        return error.SDLSetHintFailed;
+    }
+    if (c.SDL_SetHint(c.SDL_HINT_WINDOWS_DPI_SCALING , "1") != c.SDL_TRUE) {
+        logSdlError("SDL_SetHint", @src());
+        return error.SDLSetHintFailed;
+    }
 
     if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
         logSdlError("SDL_Init", @src());

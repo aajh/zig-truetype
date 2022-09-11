@@ -15,7 +15,7 @@ layout(location = 1) flat out int glyph_start;
 layout(location = 2) flat out int glyph_end;
 
 void main() {
-    vec2 pixel_expansion;
+    vec2 pixel_expansion = vec2(0, 0);
     switch(gl_VertexID % 4) {
         case 0:
             pixel_expansion = vec2(-1, -1);
